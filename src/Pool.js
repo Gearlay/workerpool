@@ -240,14 +240,8 @@ Pool.prototype._next = function () {
 Pool.prototype._getWorker = function () {
   var workers = this.workers;
 
-  if (workers.length < this.maxWorkers) {
-    // create a new worker
-    worker = this._createWorkerHandler();
-    workers.push(worker);
-  }
-
-  if (this.roundrobin) {
-    return workers[this.lastChosen++ % workers.length];
+  if (this.roundrobin && workers.length > 0) {
+    return workers[(this.lastChosen = ++this.lastChosen % workers.length)];
   }
 
   for (var i = 0; i < workers.length; i++) {
@@ -255,6 +249,13 @@ Pool.prototype._getWorker = function () {
     if (worker.busy() === false) {
       return worker;
     }
+  }
+
+  if (workers.length < this.maxWorkers) {
+    // create a new worker
+    worker = this._createWorkerHandler();
+    workers.push(worker);
+    return worker;
   }
 
   return null;

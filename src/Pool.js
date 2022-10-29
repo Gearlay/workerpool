@@ -1,7 +1,7 @@
-var Promise = require('./Promise');
-var WorkerHandler = require('./WorkerHandler');
-var environment = require('./environment');
-var DebugPortAllocator = require('./debug-port-allocator');
+var Promise = require("./Promise");
+var WorkerHandler = require("./WorkerHandler");
+var environment = require("./environment");
+var DebugPortAllocator = require("./debug-port-allocator");
 var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
 /**
  * A pool to manage workers
@@ -10,58 +10,55 @@ var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
  * @constructor
  */
 function Pool(script, options) {
-  if (typeof script === 'string') {
+  if (typeof script === "string") {
     this.script = script || null;
-  }
-  else {
+  } else {
     this.script = null;
     options = script;
   }
 
-  this.workers = [];  // queue with all workers
-  this.tasks = [];    // queue with tasks awaiting execution
+  this.workers = []; // queue with all workers
+  this.tasks = []; // queue with tasks awaiting execution
 
   options = options || {};
 
   this.forkArgs = Object.freeze(options.forkArgs || []);
   this.forkOpts = Object.freeze(options.forkOpts || {});
-  this.workerThreadOpts = Object.freeze(options.workerThreadOpts || {}) 
-  this.debugPortStart = (options.debugPortStart || 43210);
+  this.workerThreadOpts = Object.freeze(options.workerThreadOpts || {});
+  this.debugPortStart = options.debugPortStart || 43210;
   this.nodeWorker = options.nodeWorker;
-  this.workerType = options.workerType || options.nodeWorker || 'auto'
+  this.roundrobin = options.roundrobin;
+  this.workerType = options.workerType || options.nodeWorker || "auto";
   this.maxQueueSize = options.maxQueueSize || Infinity;
 
   this.onCreateWorker = options.onCreateWorker || (() => null);
   this.onTerminateWorker = options.onTerminateWorker || (() => null);
 
   // configuration
-  if (options && 'maxWorkers' in options) {
+  if (options && "maxWorkers" in options) {
     validateMaxWorkers(options.maxWorkers);
     this.maxWorkers = options.maxWorkers;
-  }
-  else {
+  } else {
     this.maxWorkers = Math.max((environment.cpus || 4) - 1, 1);
   }
 
-  if (options && 'minWorkers' in options) {
-    if(options.minWorkers === 'max') {
+  if (options && "minWorkers" in options) {
+    if (options.minWorkers === "max") {
       this.minWorkers = this.maxWorkers;
     } else {
       validateMinWorkers(options.minWorkers);
       this.minWorkers = options.minWorkers;
-      this.maxWorkers = Math.max(this.minWorkers, this.maxWorkers);     // in case minWorkers is higher than maxWorkers
+      this.maxWorkers = Math.max(this.minWorkers, this.maxWorkers); // in case minWorkers is higher than maxWorkers
     }
     this._ensureMinWorkers();
   }
 
   this._boundNext = this._next.bind(this);
 
-
-  if (this.workerType === 'thread') {
+  if (this.workerType === "thread") {
     WorkerHandler.ensureWorkerThreads();
   }
 }
-
 
 /**
  * Execute a function on a worker.
@@ -101,34 +98,33 @@ Pool.prototype.exec = function (method, params, options) {
     throw new TypeError('Array expected as argument "params"');
   }
 
-  if (typeof method === 'string') {
+  if (typeof method === "string") {
     var resolver = Promise.defer();
 
     if (this.tasks.length >= this.maxQueueSize) {
-      throw new Error('Max queue size of ' + this.maxQueueSize + ' reached');
+      throw new Error("Max queue size of " + this.maxQueueSize + " reached");
     }
 
     // add a new task to the queue
     var tasks = this.tasks;
     var task = {
-      method:  method,
-      params:  params,
+      method: method,
+      params: params,
       resolver: resolver,
       timeout: null,
-      options: options
+      options: options,
     };
     tasks.push(task);
 
     // replace the timeout method of the Promise with our own,
     // which starts the timer as soon as the task is actually started
     var originalTimeout = resolver.promise.timeout;
-    resolver.promise.timeout = function timeout (delay) {
+    resolver.promise.timeout = function timeout(delay) {
       if (tasks.indexOf(task) !== -1) {
         // task is still queued -> start the timer later on
         task.timeout = delay;
         return resolver.promise;
-      }
-      else {
+      } else {
         // task is already being executed -> start timer immediately
         return originalTimeout.call(resolver.promise, delay);
       }
@@ -138,12 +134,10 @@ Pool.prototype.exec = function (method, params, options) {
     this._next();
 
     return resolver.promise;
-  }
-  else if (typeof method === 'function') {
+  } else if (typeof method === "function") {
     // send stringified function and function arguments to worker
-    return this.exec('run', [String(method), params]);
-  }
-  else {
+    return this.exec("run", [String(method), params]);
+  } else {
     throw new TypeError('Function or string expected as argument "method"');
   }
 };
@@ -156,22 +150,21 @@ Pool.prototype.exec = function (method, params, options) {
  */
 Pool.prototype.proxy = function () {
   if (arguments.length > 0) {
-    throw new Error('No arguments expected');
+    throw new Error("No arguments expected");
   }
 
   var pool = this;
-  return this.exec('methods')
-      .then(function (methods) {
-        var proxy = {};
+  return this.exec("methods").then(function (methods) {
+    var proxy = {};
 
-        methods.forEach(function (method) {
-          proxy[method] = function () {
-            return pool.exec(method, Array.prototype.slice.call(arguments));
-          }
-        });
+    methods.forEach(function (method) {
+      proxy[method] = function () {
+        return pool.exec(method, Array.prototype.slice.call(arguments));
+      };
+    });
 
-        return proxy;
-      });
+    return proxy;
+  });
 };
 
 /**
@@ -208,19 +201,21 @@ Pool.prototype._next = function () {
       // check if the task is still pending (and not cancelled -> promise rejected)
       if (task.resolver.promise.pending) {
         // send the request to the worker
-        var promise = worker.exec(task.method, task.params, task.resolver, task.options)
+        var promise = worker
+          .exec(task.method, task.params, task.resolver, task.options)
           .then(me._boundNext)
           .catch(function () {
             // if the worker crashed and terminated, remove it from the pool
             if (worker.terminated) {
               return me._removeWorker(worker);
             }
-          }).then(function() {
+          })
+          .then(function () {
             me._next(); // trigger next task in the queue
           });
 
         // start queued timer now
-        if (typeof task.timeout === 'number') {
+        if (typeof task.timeout === "number") {
           promise.timeout(task.timeout);
         }
       } else {
@@ -231,6 +226,10 @@ Pool.prototype._next = function () {
   }
 };
 
+function mod(n, m) {
+  return ((n % m) + m) % m;
+}
+
 /**
  * Get an available worker. If no worker is available and the maximum number
  * of workers isn't yet reached, a new worker will be created and returned.
@@ -240,21 +239,24 @@ Pool.prototype._next = function () {
  * @return {WorkerHandler | null} worker
  * @private
  */
-Pool.prototype._getWorker = function() {
-  // find a non-busy worker
+Pool.prototype._getWorker = function () {
   var workers = this.workers;
-  for (var i = 0; i < workers.length; i++) {
-    var worker = workers[i];
-    if (worker.busy() === false) {
-      return worker;
-    }
-  }
 
   if (workers.length < this.maxWorkers) {
     // create a new worker
     worker = this._createWorkerHandler();
     workers.push(worker);
-    return worker;
+  }
+
+  if (this.roundrobin) {
+    return workers[mod(lastChosen + 1, worker.length)];
+  }
+
+  for (var i = 0; i < workers.length; i++) {
+    var worker = workers[i];
+    if (worker.busy() === false) {
+      return worker;
+    }
   }
 
   return null;
@@ -268,7 +270,7 @@ Pool.prototype._getWorker = function() {
  * @return {Promise<WorkerHandler>}
  * @protected
  */
-Pool.prototype._removeWorker = function(worker) {
+Pool.prototype._removeWorker = function (worker) {
   var me = this;
 
   DEBUG_PORT_ALLOCATOR.releasePort(worker.debugPort);
@@ -277,12 +279,12 @@ Pool.prototype._removeWorker = function(worker) {
   // If minWorkers set, spin up new workers to replace the crashed ones
   this._ensureMinWorkers();
   // terminate the worker (if not already terminated)
-  return new Promise(function(resolve, reject) {
-    worker.terminate(false, function(err) {
+  return new Promise(function (resolve, reject) {
+    worker.terminate(false, function (err) {
       me.onTerminateWorker({
         forkArgs: worker.forkArgs,
         forkOpts: worker.forkOpts,
-        script: worker.script
+        script: worker.script,
       });
       if (err) {
         reject(err);
@@ -298,7 +300,7 @@ Pool.prototype._removeWorker = function(worker) {
  * @param {WorkerHandler} worker
  * @protected
  */
-Pool.prototype._removeWorkerFromList = function(worker) {
+Pool.prototype._removeWorkerFromList = function (worker) {
   // remove from the list with workers
   var index = this.workers.indexOf(worker);
   if (index !== -1) {
@@ -321,7 +323,7 @@ Pool.prototype.terminate = function (force, timeout) {
 
   // cancel any pending tasks
   this.tasks.forEach(function (task) {
-    task.resolver.reject(new Error('Pool terminated'));
+    task.resolver.reject(new Error("Pool terminated"));
   });
   this.tasks.length = 0;
 
@@ -333,13 +335,14 @@ Pool.prototype.terminate = function (force, timeout) {
   var promises = [];
   var workers = this.workers.slice();
   workers.forEach(function (worker) {
-    var termPromise = worker.terminateAndNotify(force, timeout)
+    var termPromise = worker
+      .terminateAndNotify(force, timeout)
       .then(removeWorker)
-      .always(function() {
+      .always(function () {
         me.onTerminateWorker({
           forkArgs: worker.forkArgs,
           forkOpts: worker.forkOpts,
-          script: worker.script
+          script: worker.script,
         });
       });
     promises.push(termPromise);
@@ -358,12 +361,12 @@ Pool.prototype.stats = function () {
   }).length;
 
   return {
-    totalWorkers:  totalWorkers,
-    busyWorkers:   busyWorkers,
-    idleWorkers:   totalWorkers - busyWorkers,
+    totalWorkers: totalWorkers,
+    busyWorkers: busyWorkers,
+    idleWorkers: totalWorkers - busyWorkers,
 
-    pendingTasks:  this.tasks.length,
-    activeTasks:   busyWorkers
+    pendingTasks: this.tasks.length,
+    activeTasks: busyWorkers,
   };
 };
 
@@ -371,9 +374,9 @@ Pool.prototype.stats = function () {
  * Ensures that a minimum of minWorkers is up and running
  * @protected
  */
-Pool.prototype._ensureMinWorkers = function() {
+Pool.prototype._ensureMinWorkers = function () {
   if (this.minWorkers) {
-    for(var i = this.workers.length; i < this.minWorkers; i++) {
+    for (var i = this.workers.length; i < this.minWorkers; i++) {
       this.workers.push(this._createWorkerHandler());
     }
   }
@@ -385,21 +388,24 @@ Pool.prototype._ensureMinWorkers = function() {
  * @private
  */
 Pool.prototype._createWorkerHandler = function () {
-  const overridenParams = this.onCreateWorker({
-    forkArgs: this.forkArgs,
-    forkOpts: this.forkOpts,
-    workerThreadOpts: this.workerThreadOpts,
-    script: this.script
-  }) || {};
+  const overridenParams =
+    this.onCreateWorker({
+      forkArgs: this.forkArgs,
+      forkOpts: this.forkOpts,
+      workerThreadOpts: this.workerThreadOpts,
+      script: this.script,
+    }) || {};
 
   return new WorkerHandler(overridenParams.script || this.script, {
     forkArgs: overridenParams.forkArgs || this.forkArgs,
     forkOpts: overridenParams.forkOpts || this.forkOpts,
     workerThreadOpts: overridenParams.workerThreadOpts || this.workerThreadOpts,
-    debugPort: DEBUG_PORT_ALLOCATOR.nextAvailableStartingAt(this.debugPortStart),
-    workerType: this.workerType
+    debugPort: DEBUG_PORT_ALLOCATOR.nextAvailableStartingAt(
+      this.debugPortStart
+    ),
+    workerType: this.workerType,
   });
-}
+};
 
 /**
  * Ensure that the maxWorkers option is an integer >= 1
@@ -408,7 +414,7 @@ Pool.prototype._createWorkerHandler = function () {
  */
 function validateMaxWorkers(maxWorkers) {
   if (!isNumber(maxWorkers) || !isInteger(maxWorkers) || maxWorkers < 1) {
-    throw new TypeError('Option maxWorkers must be an integer number >= 1');
+    throw new TypeError("Option maxWorkers must be an integer number >= 1");
   }
 }
 
@@ -419,7 +425,7 @@ function validateMaxWorkers(maxWorkers) {
  */
 function validateMinWorkers(minWorkers) {
   if (!isNumber(minWorkers) || !isInteger(minWorkers) || minWorkers < 0) {
-    throw new TypeError('Option minWorkers must be an integer number >= 0');
+    throw new TypeError("Option minWorkers must be an integer number >= 0");
   }
 }
 
@@ -429,7 +435,7 @@ function validateMinWorkers(minWorkers) {
  * @returns {boolean} returns true when value is a number
  */
 function isNumber(value) {
-  return typeof value === 'number';
+  return typeof value === "number";
 }
 
 /**

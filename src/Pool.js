@@ -58,6 +58,8 @@ function Pool(script, options) {
   if (this.workerType === "thread") {
     WorkerHandler.ensureWorkerThreads();
   }
+
+  this.lastChosen = -1;
 }
 
 /**
@@ -226,10 +228,6 @@ Pool.prototype._next = function () {
   }
 };
 
-function mod(n, m) {
-  return ((n % m) + m) % m;
-}
-
 /**
  * Get an available worker. If no worker is available and the maximum number
  * of workers isn't yet reached, a new worker will be created and returned.
@@ -249,7 +247,7 @@ Pool.prototype._getWorker = function () {
   }
 
   if (this.roundrobin) {
-    return workers[mod(lastChosen + 1, worker.length)];
+    return workers[this.lastChosen++ % workers.length];
   }
 
   for (var i = 0; i < workers.length; i++) {

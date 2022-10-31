@@ -210,7 +210,8 @@ function WorkerHandler(script, _options) {
   this.debugPort = options.debugPort;
   this.forkOpts = options.forkOpts;
   this.forkArgs = options.forkArgs;
-  this.workerThreadOpts = options.workerThreadOpts
+  this.workerThreadOpts = options.workerThreadOpts;
+  this.concurrency = options.concurrency || 1;
 
   // The ready message is only sent if the worker.add method is called (And the default script is not used)
   if (!script) {
@@ -377,7 +378,7 @@ WorkerHandler.prototype.exec = function(method, params, resolver, options) {
  * @return {boolean} Returns true if the worker is busy
  */
 WorkerHandler.prototype.busy = function () {
-  return Object.keys(this.processing).length > 0;
+  return Object.keys(this.processing).length >= this.concurrency;
 };
 
 /**

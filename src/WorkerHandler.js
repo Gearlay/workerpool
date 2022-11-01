@@ -84,7 +84,7 @@ function setupWorker(script, options) {
     else { // environment.platform === 'node'
       var WorkerThreads = tryRequireWorkerThreads();
       if (WorkerThreads) {
-        return setupWorkerThreadWorker(script, WorkerThreads);
+        return setupWorkerThreadWorker(script, WorkerThreads, options.workerThreadOpts);
       } else {
         return setupProcessWorker(script, resolveForkOptions(options), requireFoolWebpack('child_process'));
       }

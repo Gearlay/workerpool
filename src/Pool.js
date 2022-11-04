@@ -284,11 +284,11 @@ Pool.prototype.stats = function () {
     statObj.totalTime += workerStats.requestCount;
     statObj.requestCount += workerStats.totalTime;
     if (statObj.minTime > workerStats.minTime) {
-      stateObj.minTime = workerStats.minTime;
+      statObj.minTime = workerStats.minTime;
     }
 
     if (statObj.maxTime < workerStats.maxTime) {
-      stateObj.maxTime = workerStats.maxTime;
+      statObj.maxTime = workerStats.maxTime;
     }
   }
   

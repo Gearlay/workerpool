@@ -211,7 +211,7 @@ function WorkerHandler(script, _options) {
   this.forkOpts = options.forkOpts;
   this.forkArgs = options.forkArgs;
   this.workerThreadOpts = options.workerThreadOpts;
-  this.concurrency = options.concurrency || 1;
+  this.concurrency = options.concurrency ? options.concurrency : 1;
   this.requestCount = 0;
   this.totalTime = 0;
   this.minTime = Infinity;
@@ -243,13 +243,13 @@ function WorkerHandler(script, _options) {
         } else {
           const opts = me.processing[id];
           const timeSpent = Date.now() - opts.started;
-          if (timeSpent > this.maxTime) {
-            this.maxTime = timeSpent;
+          if (timeSpent > me.maxTime) {
+            me.maxTime = timeSpent;
           }
-          if (timeSpent < this.minTime) {
-            this.minTime = timeSpent;
+          if (timeSpent < me.minTime) {
+            me.minTime = timeSpent;
           }
-          this.totalTime += timeSpent;
+          me.totalTime += timeSpent;
 
           // remove the task from the queue
           delete me.processing[id];

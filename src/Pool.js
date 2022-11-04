@@ -30,6 +30,7 @@ function Pool(script, options) {
   this.roundrobin = options.roundrobin;
   this.workerType = options.workerType || options.nodeWorker || "auto";
   this.maxQueueSize = options.maxQueueSize || Infinity;
+  this.concurrency = options.concurrency;
 
   this.onCreateWorker = options.onCreateWorker || (() => null);
   this.onTerminateWorker = options.onTerminateWorker || (() => null);
@@ -270,31 +271,33 @@ Pool.prototype._getWorker = function () {
  * @return {WorkerHandler | null} worker
  * @private
  */
-Pool.prototype.stats = function () {
+Pool.prototype.wstats = function () {
   var workers = this.workers;
   const statObj = {
     totalTime: 0,
     minTime: 0,
     maxTime: 0,
     requestCount: 0,
-  }
+    totalUtil: 0,
+  };
 
   for (var i = 0; i < workers.length; i++) {
-    const workerStats = workers[i].stats();
-    statObj.totalTime += workerStats.requestCount;
-    statObj.requestCount += workerStats.totalTime;
-    if (statObj.minTime > workerStats.minTime) {
-      statObj.minTime = workerStats.minTime;
+    const worker = workers[i];
+    statObj.requestCount += worker.requestCount;
+    statObj.totalTime += worker.totalTime;
+    if (statObj.minTime > worker.minTime) {
+      statObj.minTime = worker.minTime;
     }
 
-    if (statObj.maxTime < workerStats.maxTime) {
-      statObj.maxTime = workerStats.maxTime;
+    if (statObj.maxTime < worker.maxTime) {
+      statObj.maxTime = worker.maxTime;
     }
+    statObj.totalUtil += worker.worker.performance.eventLoopUtilization().utilization;
   }
-  
+
+  statObj.avgUtil = statObj.totalUtil / workers.length;
   return statObj;
 };
-
 
 /**
  * Remove a worker from the pool.
@@ -438,6 +441,7 @@ Pool.prototype._createWorkerHandler = function () {
       this.debugPortStart
     ),
     workerType: this.workerType,
+    concurrency: this.concurrency,
   });
 };
 

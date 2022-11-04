@@ -212,6 +212,10 @@ function WorkerHandler(script, _options) {
   this.forkArgs = options.forkArgs;
   this.workerThreadOpts = options.workerThreadOpts;
   this.concurrency = options.concurrency || 1;
+  this.requestCount = 0;
+  this.totalTime = 0;
+  this.minTime = Infinity;
+  this.maxTime = 0;
 
   // The ready message is only sent if the worker.add method is called (And the default script is not used)
   if (!script) {
@@ -237,6 +241,16 @@ function WorkerHandler(script, _options) {
             task.options.on(response.payload);
           }
         } else {
+          const opts = me.processing[id];
+          const timeSpent = Date.now() - opts.started;
+          if (timeSpent > this.maxTime) {
+            this.maxTime = timeSpent;
+          }
+          if (timeSpent < this.minTime) {
+            this.minTime = timeSpent;
+          }
+          this.totalTime += timeSpent;
+
           // remove the task from the queue
           delete me.processing[id];
 
@@ -333,8 +347,10 @@ WorkerHandler.prototype.exec = function(method, params, resolver, options) {
   this.processing[id] = {
     id: id,
     resolver: resolver,
-    options: options
+    options: options,
+    started: Date.now()
   };
+  this.requestCount++;
 
   // build a JSON-RPC request
   var request = {

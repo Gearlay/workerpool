@@ -262,6 +262,41 @@ Pool.prototype._getWorker = function () {
 };
 
 /**
+ * Get an available worker. If no worker is available and the maximum number
+ * of workers isn't yet reached, a new worker will be created and returned.
+ * If no worker is available and the maximum number of workers is reached,
+ * null will be returned.
+ *
+ * @return {WorkerHandler | null} worker
+ * @private
+ */
+Pool.prototype.stats = function () {
+  var workers = this.workers;
+  const statObj = {
+    totalTime: 0,
+    minTime: 0,
+    maxTime: 0,
+    requestCount: 0,
+  }
+
+  for (var i = 0; i < workers.length; i++) {
+    const workerStats = workers[i].stats();
+    statObj.totalTime += workerStats.requestCount;
+    statObj.requestCount += workerStats.totalTime;
+    if (statObj.minTime > workerStats.minTime) {
+      stateObj.minTime = workerStats.minTime;
+    }
+
+    if (statObj.maxTime < workerStats.maxTime) {
+      stateObj.maxTime = workerStats.maxTime;
+    }
+  }
+  
+  return statObj;
+};
+
+
+/**
  * Remove a worker from the pool.
  * Attempts to terminate worker if not already terminated, and ensures the minimum
  * pool size is met.

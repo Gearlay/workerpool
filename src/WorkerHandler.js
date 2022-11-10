@@ -216,6 +216,12 @@ function WorkerHandler(script, _options) {
   this.totalTime = 0;
   this.minTime = Infinity;
   this.maxTime = 0;
+  this.lastTime = 0;
+  // Reset stats every hour
+  setInterval(() => {
+    this.minTime = Infinity;
+    this.maxTime = 0;
+  }, 1000 * 60 * 5)
 
   // The ready message is only sent if the worker.add method is called (And the default script is not used)
   if (!script) {
@@ -243,6 +249,8 @@ function WorkerHandler(script, _options) {
         } else {
           const opts = me.processing[id];
           const timeSpent = Date.now() - opts.started;
+          
+          me.lastTime = timeSpent;
           if (timeSpent > me.maxTime) {
             me.maxTime = timeSpent;
           }

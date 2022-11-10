@@ -276,6 +276,7 @@ Pool.prototype.wstats = function () {
   const statObj = {
     totalTime: 0,
     minTime: 0,
+    lastTime: 0,
     maxTime: 0,
     requestCount: 0,
     totalUtil: 0,
@@ -291,6 +292,10 @@ Pool.prototype.wstats = function () {
 
     if (statObj.maxTime < worker.maxTime) {
       statObj.maxTime = worker.maxTime;
+    }
+
+    if (statObj.lastTime < worker.lastTime) {
+      statObj.lastTime = worker.lastTime;
     }
     statObj.totalUtil += worker.worker.performance.eventLoopUtilization().utilization;
   }

@@ -31,6 +31,8 @@ function Pool(script, options) {
   this.workerType = options.workerType || options.nodeWorker || "auto";
   this.maxQueueSize = options.maxQueueSize || Infinity;
   this.concurrency = options.concurrency;
+  this.gradualScaling = options.gradualScaling || 0;
+  this.canCreateWorker = true;
 
   this.onCreateWorker = options.onCreateWorker || (() => null);
   this.onTerminateWorker = options.onTerminateWorker || (() => null);
@@ -240,26 +242,38 @@ Pool.prototype._next = function () {
  */
 Pool.prototype._getWorker = function () {
   var workers = this.workers;
+  let chosenWorker;
 
   if (this.roundrobin && workers.length > 0) {
-    return workers[(this.lastChosen = ++this.lastChosen % workers.length)];
+    chosenWorker = workers[(this.lastChosen = ++this.lastChosen % workers.length)];
   }
 
-  for (var i = 0; i < workers.length; i++) {
-    var worker = workers[i];
-    if (worker.busy() === false) {
-      return worker;
+  if (!chosenWorker) {
+    for (var i = 0; i < workers.length; i++) {
+      var worker = workers[i];
+      if (worker.busy() === false) {
+        chosenWorker = worker;
+        break;
+      }
     }
   }
 
   if (workers.length < this.maxWorkers) {
     // create a new worker
-    worker = this._createWorkerHandler();
-    workers.push(worker);
-    return worker;
+    if (this.gradualScaling === 0) {
+      worker = this._createWorkerHandler();
+      workers.push(worker);
+      chosenWorker = worker;
+    } else if (this.canCreateWorker) {
+      this.canCreateWorker = false;
+      setTimeout(() => (this.canCreateWorker = true), this.gradualScaling);
+      worker = this._createWorkerHandler();
+      workers.push(worker);
+      chosenWorker = worker;
+    }
   }
 
-  return null;
+  return chosenWorker;
 };
 
 /**
@@ -280,6 +294,8 @@ Pool.prototype.wstats = function () {
     maxTime: 0,
     requestCount: 0,
     totalUtil: 0,
+    workerCount: this.workers.length,
+    workerMax: this.maxWorkers
   };
 
   for (var i = 0; i < workers.length; i++) {

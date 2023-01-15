@@ -295,11 +295,13 @@ Pool.prototype.wstats = function () {
     requestCount: 0,
     totalUtil: 0,
     workerCount: this.workers.length,
-    workerMax: this.maxWorkers
+    workerMax: this.maxWorkers,
+    workersReady: 0,
   };
 
   for (var i = 0; i < workers.length; i++) {
     const worker = workers[i];
+    worker.worker.ready && statObj.workersReady++;
     statObj.requestCount += worker.requestCount;
     statObj.totalTime += worker.totalTime;
     if (statObj.minTime > worker.minTime) {

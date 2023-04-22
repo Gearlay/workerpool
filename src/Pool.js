@@ -197,7 +197,8 @@ Pool.prototype._next = function () {
     // there are tasks in the queue
 
     // find an available worker
-    var worker = this._getWorker();
+    const affinity = this.tasks[0].options?.affinity;
+    var worker = this._getWorker(affinity);
     if (worker) {
       // get the first task from the queue
       var me = this;
@@ -240,12 +241,18 @@ Pool.prototype._next = function () {
  * @return {WorkerHandler | null} worker
  * @private
  */
-Pool.prototype._getWorker = function () {
+Pool.prototype._getWorker = function (affinity) {
   var workers = this.workers;
   let chosenWorker;
 
-  if (this.roundrobin && workers.length > 0) {
-    chosenWorker = workers[(this.lastChosen = ++this.lastChosen % workers.length)];
+  // Affinity trumps roundrobin
+  if (affinity != null) {
+    chosenWorker = workers[affinity % workers.length];
+  }
+
+  if (!chosenWorker && this.roundrobin && workers.length > 0) {
+    chosenWorker =
+      workers[(this.lastChosen = ++this.lastChosen % workers.length)];
   }
 
   if (!chosenWorker) {
@@ -315,7 +322,8 @@ Pool.prototype.wstats = function () {
     if (statObj.lastTime < worker.lastTime) {
       statObj.lastTime = worker.lastTime;
     }
-    statObj.totalUtil += worker.worker.performance.eventLoopUtilization().utilization;
+    statObj.totalUtil +=
+      worker.worker.performance.eventLoopUtilization().utilization;
   }
 
   statObj.avgUtil = statObj.totalUtil / workers.length;

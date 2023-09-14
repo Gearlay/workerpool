@@ -322,8 +322,9 @@ Pool.prototype.wstats = function () {
     if (statObj.lastTime < worker.lastTime) {
       statObj.lastTime = worker.lastTime;
     }
-    statObj.totalUtil +=
-      worker.worker.performance.eventLoopUtilization().utilization;
+    statObj.totalUtil += worker.worker.performance
+      ? worker.worker.performance.eventLoopUtilization().utilization
+      : 0;
   }
 
   statObj.avgUtil = statObj.totalUtil / workers.length;

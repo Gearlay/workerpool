@@ -241,10 +241,21 @@ function WorkerHandler(script, _options) {
   this.workerThreadOpts = options.workerThreadOpts;
   this.concurrency = options.concurrency ? options.concurrency : 1;
   this.requestCount = 0;
+  this.responseCount = 0;
+  this.maxExec = options.maxExec || 0;
   this.totalTime = 0;
   this.minTime = Infinity;
   this.maxTime = 0;
   this.lastTime = 0;
+
+  let _onWorkerExit = options.onWorkerExit;
+  this.onWorkerExit = function () {
+    if (_onWorkerExit) {
+      _onWorkerExit();
+    }
+    _onWorkerExit = null;
+  };
+
   // Reset stats every hour
   setInterval(() => {
     this.minTime = Infinity;
@@ -287,8 +298,15 @@ function WorkerHandler(script, _options) {
           }
           me.totalTime += timeSpent;
 
+          this.responseCount++;
+
           // remove the task from the queue
           delete me.processing[id];
+
+          if (this.maxExec && this.responseCount >= this.maxExec) {
+            me.terminating = true;
+            me.onWorkerExit();
+          }
 
           // test if we need to terminate
           if (me.terminating === true) {
@@ -317,6 +335,7 @@ function WorkerHandler(script, _options) {
       }
     }
     me.processing = Object.create(null);
+    me.onWorkerExit();
   }
 
   // send all queued requests to worker
@@ -434,6 +453,20 @@ WorkerHandler.prototype.exec = function (method, params, resolver, options) {
  */
 WorkerHandler.prototype.busy = function () {
   return Object.keys(this.processing).length >= this.concurrency;
+};
+
+/**
+ * Test whether the worker is available to take new tasks
+ * @return {boolean} Returns true if the worker is available
+ */
+WorkerHandler.prototype.available = function () {
+  return (
+    !this.worker.terminated &&
+    !this.worker.terminating &&
+    this.worker.ready &&
+    (!this.maxExec || this.requestCount < this.maxExec) &&
+    !this.busy()
+  );
 };
 
 /**

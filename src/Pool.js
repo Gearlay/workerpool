@@ -22,6 +22,7 @@ var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
  * @property {Function} [onTerminateWorker]
  * @property {number} [maxWorkers]
  * @property {number | "max"} [minWorkers]
+ * @property {number} [busyBackoffDuration]
  */
 /**
  * A pool to manage workers
@@ -54,6 +55,7 @@ function Pool(script, options) {
   this.gradualScaling = options.gradualScaling || 0;
   this.canCreateWorker = true;
   this.maxExec = options.maxExec || 0;
+  this.busyBackoffDuration = options.busyBackoffDuration || 0;
 
   this.onCreateWorker = options.onCreateWorker || (() => null);
   this.onTerminateWorker = options.onTerminateWorker || (() => null);
@@ -507,6 +509,8 @@ Pool.prototype._createWorkerHandler = function () {
     workerType: this.workerType,
     concurrency: this.concurrency,
     maxExec: overridenParams.maxExec || this.maxExec,
+    busyBackoffDuration:
+      overridenParams.busyBackoffDuration || this.busyBackoffDuration,
     onWorkerExit: () => {
       this._removeWorker(worker);
     },

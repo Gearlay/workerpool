@@ -243,6 +243,7 @@ function WorkerHandler(script, _options) {
   this.requestCount = 0;
   this.responseCount = 0;
   this.maxExec = options.maxExec || 0;
+  this.busyBackoffDuration = options.busyBackoffDuration || 0;
   this.totalTime = 0;
   this.minTime = Infinity;
   this.maxTime = 0;
@@ -300,10 +301,23 @@ function WorkerHandler(script, _options) {
 
           this.responseCount++;
 
-          // remove the task from the queue
-          delete me.processing[id];
+          const maxExecReached =
+            this.maxExec && this.responseCount >= this.maxExec;
+          const busyBackoffDuration =
+            maxExecReached || me.terminating || me.terminated
+              ? 0
+              : me.busyBackoffDuration;
 
-          if (this.maxExec && this.responseCount >= this.maxExec) {
+          // remove the task from the queue
+          if (busyBackoffDuration) {
+            setTimeout(() => {
+              delete me.processing[id];
+            }, busyBackoffDuration);
+          } else {
+            delete me.processing[id];
+          }
+
+          if (maxExecReached) {
             me.terminating = true;
             me.onWorkerExit();
           }

@@ -22,7 +22,9 @@ var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
  * @property {Function} [onTerminateWorker]
  * @property {number} [maxWorkers]
  * @property {number | "max"} [minWorkers]
- */
+ * @property {boolean} [markNotReadyAfterExec] Default false. If true will mark the worker as not ready after an execution finishes. It then expects the worker to signal ready afterwards
+ * @property {number} [readyTimeoutDuration] if not set or set to 0 will not have a ready timeout
+ * @property {number} [initReadyTimeoutDuration] defaults to `readyTimeoutDuration`
 /**
  * A pool to manage workers
  * @param {String} [script]   Optional worker script
@@ -54,6 +56,10 @@ function Pool(script, options) {
   this.gradualScaling = options.gradualScaling || 0;
   this.canCreateWorker = true;
   this.maxExec = options.maxExec || 0;
+  this.markNotReadyAfterExec = options.markNotReadyAfterExec || false;
+  this.readyTimeoutDuration = options.readyTimeoutDuration || 0;
+  this.initReadyTimeoutDuration =
+    options.initReadyTimeoutDuration || this.readyTimeoutDuration;
 
   this.onCreateWorker = options.onCreateWorker || (() => null);
   this.onTerminateWorker = options.onTerminateWorker || (() => null);
@@ -291,16 +297,18 @@ Pool.prototype._getWorker = function (affinity) {
     if (this.gradualScaling === 0) {
       worker = this._createWorkerHandler();
       workers.push(worker);
-      chosenWorker = worker;
+      chosenWorker = chosenWorker || worker;
     } else if (this.canCreateWorker) {
       this.canCreateWorker = false;
       setTimeout(() => (this.canCreateWorker = true), this.gradualScaling);
       worker = this._createWorkerHandler();
       workers.push(worker);
-      chosenWorker = worker;
+      chosenWorker = chosenWorker || worker;
     }
   }
-
+  if (!chosenWorker || !chosenWorker.available()) {
+    return;
+  }
   return chosenWorker;
 };
 
@@ -507,8 +515,19 @@ Pool.prototype._createWorkerHandler = function () {
     workerType: this.workerType,
     concurrency: this.concurrency,
     maxExec: overridenParams.maxExec || this.maxExec,
+    markNotReadyAfterExec:
+      overridenParams.markNotReadyAfterExec == null
+        ? this.markNotReadyAfterExec
+        : overridenParams.markNotReadyAfterExec,
+    readyTimeoutDuration:
+      overridenParams.readyTimeoutDuration || this.readyTimeoutDuration,
+    initReadyTimeoutDuration:
+      overridenParams.initReadyTimeoutDuration || this.initReadyTimeoutDuration,
     onWorkerExit: () => {
       this._removeWorker(worker);
+    },
+    onWorkerReady: () => {
+      this._next();
     },
   });
 

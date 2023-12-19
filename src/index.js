@@ -1,4 +1,4 @@
-var environment = require('./environment');
+var environment = require("./environment");
 
 /**
  * Create a new worker pool
@@ -7,7 +7,7 @@ var environment = require('./environment');
  * @returns {Pool} pool
  */
 exports.pool = function pool(script, options) {
-  var Pool = require('./Pool');
+  var Pool = require("./Pool");
 
   return new Pool(script, options);
 };
@@ -17,24 +17,32 @@ exports.pool = function pool(script, options) {
  * @param {Object} [methods]
  */
 exports.worker = function worker(methods) {
-  var worker = require('./worker');
+  var worker = require("./worker");
   worker.add(methods);
 };
 
 /**
  * Sends an event to the parent worker pool.
- * @param {any} payload 
+ * @param {any} payload
  */
 exports.workerEmit = function workerEmit(payload) {
-  var worker = require('./worker');
+  var worker = require("./worker");
   worker.emit(payload);
+};
+
+/**
+ * tells the parent pool that this worker is ready.
+ */
+exports.workerReady = function workerReady() {
+  var worker = require("./worker");
+  worker.ready();
 };
 
 /**
  * Create a promise.
  * @type {Promise} promise
  */
-exports.Promise = require('./Promise');
+exports.Promise = require("./Promise");
 
 exports.platform = environment.platform;
 exports.isMainThread = environment.isMainThread;

@@ -31,6 +31,14 @@ exports.workerEmit = function workerEmit(payload) {
 };
 
 /**
+ * tells the parent pool that this worker is ready.
+ */
+exports.workerReady = function workerReady() {
+  var worker = require("./worker");
+  worker.ready();
+};
+
+/**
  * Create a promise.
  * @type {Promise} promise
  */

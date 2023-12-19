@@ -211,6 +211,9 @@ function resolveForkOptions(opts) {
  * @return {Error} The equivalent Error.
  */
 function objectToError(obj) {
+  if (typeof obj === "string") {
+    return new Error(obj);
+  }
   var temp = new Error("");
   var props = Object.keys(obj);
 
@@ -247,6 +250,12 @@ function WorkerHandler(script, _options) {
   this.minTime = Infinity;
   this.maxTime = 0;
   this.lastTime = 0;
+  this.markNotReadyAfterExec = options.markNotReadyAfterExec || false;
+  this.readyTimeoutDuration = options.readyTimeoutDuration;
+  this.initReadyTimeoutDuration =
+    options.initReadyTimeoutDuration == null
+      ? this.readyTimeoutDuration
+      : options.initReadyTimeoutDuration;
 
   let _onWorkerExit = options.onWorkerExit;
   this.onWorkerExit = function () {
@@ -254,6 +263,30 @@ function WorkerHandler(script, _options) {
       _onWorkerExit();
     }
     _onWorkerExit = null;
+  };
+
+  let _onWorkerReady = options.onWorkerReady;
+  this.onWorkerReady = function () {
+    if (_onWorkerReady) {
+      _onWorkerReady();
+    }
+  };
+
+  this.setReadyTimeout = function (timeoutDuration) {
+    me.clearReadyTimeout();
+    if (!timeoutDuration) {
+      return;
+    }
+    me.readyTimeoutTimer = setTimeout(() => {
+      me.terminate();
+    }, timeoutDuration);
+  };
+  this.clearReadyTimeout = function () {
+    if (!me.readyTimeoutTimer) {
+      return;
+    }
+    clearTimeout(me.readyTimeoutTimer);
+    delete me.readyTimeoutTimer;
   };
 
   // Reset stats every hour
@@ -265,6 +298,7 @@ function WorkerHandler(script, _options) {
   // The ready message is only sent if the worker.add method is called (And the default script is not used)
   if (!script) {
     this.worker.ready = true;
+    this.onWorkerReady();
   }
 
   // queue for requests that are received before the worker is ready
@@ -274,7 +308,9 @@ function WorkerHandler(script, _options) {
       return;
     }
     if (typeof response === "string" && response === "ready") {
+      me.clearReadyTimeout();
       me.worker.ready = true;
+      me.onWorkerReady();
       dispatchQueuedRequests();
     } else {
       // find the task from the processing queue, and run the tasks callback
@@ -298,7 +334,12 @@ function WorkerHandler(script, _options) {
           }
           me.totalTime += timeSpent;
 
-          this.responseCount++;
+          me.responseCount++;
+
+          if (me.markNotReadyAfterExec) {
+            me.worker.ready = false;
+            me.setReadyTimeout(me.readyTimeoutDuration);
+          }
 
           // remove the task from the queue
           delete me.processing[id];
@@ -324,6 +365,8 @@ function WorkerHandler(script, _options) {
       }
     }
   });
+
+  this.setReadyTimeout(this.initReadyTimeoutDuration);
 
   // reject all running tasks on worker error
   function onError(error) {
@@ -461,6 +504,7 @@ WorkerHandler.prototype.busy = function () {
  */
 WorkerHandler.prototype.available = function () {
   return (
+    this.worker &&
     !this.worker.terminated &&
     !this.worker.terminating &&
     this.worker.ready &&
@@ -479,6 +523,7 @@ WorkerHandler.prototype.available = function () {
  */
 WorkerHandler.prototype.terminate = function (force, callback) {
   var me = this;
+  this.clearReadyTimeout();
   if (force) {
     // cancel all tasks in progress
     for (var id in this.processing) {

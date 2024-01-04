@@ -277,15 +277,13 @@ Pool.prototype._getWorker = function (affinity) {
     chosenWorker = workers[affinity % workers.length];
   }
 
-  if (!chosenWorker && this.roundrobin && workers.length > 0) {
-    chosenWorker =
-      workers[(this.lastChosen = ++this.lastChosen % workers.length)];
-  }
-
   if (!chosenWorker) {
+    var offset = this.roundrobin ? this.lastChosen + 1 : 0;
     for (var i = 0; i < workers.length; i++) {
-      var worker = workers[i];
+      const workerIndex = (i + offset) % workers.length;
+      var worker = workers[workerIndex];
       if (worker.available()) {
+        this.lastChosen = workerIndex;
         chosenWorker = worker;
         break;
       }

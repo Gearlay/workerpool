@@ -206,8 +206,13 @@ worker.emit = function (payload) {
   }
 };
 
-worker.ready = function () {
-  worker.send("ready");
+worker.ready = function (isReady) {
+  isReady = isReady == null ? true : isReady;
+  if (isReady) {
+    worker.send("ready");
+  } else {
+    worker.send("notready");
+  }
 };
 
 if (typeof exports !== "undefined") {

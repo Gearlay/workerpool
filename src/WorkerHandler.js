@@ -307,11 +307,16 @@ function WorkerHandler(script, _options) {
     if (me.terminated) {
       return;
     }
-    if (typeof response === "string" && response === "ready") {
+    if (response === "ready") {
       me.clearReadyTimeout();
       me.worker.ready = true;
       me.onWorkerReady();
       dispatchQueuedRequests();
+    } else if (response === "notready") {
+      dispatchQueuedRequests();
+      me.clearReadyTimeout();
+      me.setReadyTimeout(me.readyTimeoutDuration);
+      me.worker.ready = false;
     } else {
       // find the task from the processing queue, and run the tasks callback
       var id = response.id;

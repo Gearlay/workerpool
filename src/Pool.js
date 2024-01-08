@@ -335,6 +335,9 @@ Pool.prototype.wstats = function () {
 
   for (var i = 0; i < workers.length; i++) {
     const worker = workers[i];
+    if (!worker.worker) {
+      continue;
+    }
     worker.worker.ready && statObj.workersReady++;
     statObj.requestCount += worker.requestCount;
     statObj.totalTime += worker.totalTime;

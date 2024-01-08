@@ -3,6 +3,28 @@ var WorkerHandler = require("./WorkerHandler");
 var environment = require("./environment");
 var DebugPortAllocator = require("./debug-port-allocator");
 var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
+
+/**
+ * @typedef {"auto" | "thread" | "thread" | "web"} WorkerType
+ * @typedef {Object} WorkerPoolOptions
+ * @property {string[]} [forkArgs]
+ * @property {import('child_process').ForkOptions} [forkOpts]
+ * @property {import('worker_threads').WorkerOptions} [workerThreadOpts]
+ * @property {number} [debugPortStart]
+ * @property {WorkerType} [nodeWorker] alias to workerType
+ * @property {boolean} [roundrobin]
+ * @property {WorkerType} [workerType]
+ * @property {number} [maxQueueSize]
+ * @property {number} [concurrency]
+ * @property {number} [gradualScaling]
+ * @property {number} [maxExec] the number of distinct executions allowed
+ * @property {Function} [onCreateWorker]
+ * @property {Function} [onTerminateWorker]
+ * @property {number} [maxWorkers]
+ * @property {number | "max"} [minWorkers]
+ * @property {boolean} [markNotReadyAfterExec] Default false. If true will mark the worker as not ready after an execution finishes. It then expects the worker to signal ready afterwards
+ * @property {number} [readyTimeoutDuration] if not set or set to 0 will not have a ready timeout
+ * @property {number} [initReadyTimeoutDuration] defaults to `readyTimeoutDuration`
 /**
  * A pool to manage workers
  * @param {String} [script]   Optional worker script
@@ -33,6 +55,11 @@ function Pool(script, options) {
   this.concurrency = options.concurrency;
   this.gradualScaling = options.gradualScaling || 0;
   this.canCreateWorker = true;
+  this.maxExec = options.maxExec || 0;
+  this.markNotReadyAfterExec = options.markNotReadyAfterExec || false;
+  this.readyTimeoutDuration = options.readyTimeoutDuration || 0;
+  this.initReadyTimeoutDuration =
+    options.initReadyTimeoutDuration || this.readyTimeoutDuration;
 
   this.onCreateWorker = options.onCreateWorker || (() => null);
   this.onTerminateWorker = options.onTerminateWorker || (() => null);
@@ -250,15 +277,13 @@ Pool.prototype._getWorker = function (affinity) {
     chosenWorker = workers[affinity % workers.length];
   }
 
-  if (!chosenWorker && this.roundrobin && workers.length > 0) {
-    chosenWorker =
-      workers[(this.lastChosen = ++this.lastChosen % workers.length)];
-  }
-
   if (!chosenWorker) {
+    var offset = this.roundrobin ? this.lastChosen + 1 : 0;
     for (var i = 0; i < workers.length; i++) {
-      var worker = workers[i];
-      if (worker.busy() === false) {
+      const workerIndex = (i + offset) % workers.length;
+      var worker = workers[workerIndex];
+      if (worker.available()) {
+        this.lastChosen = workerIndex;
         chosenWorker = worker;
         break;
       }
@@ -270,16 +295,18 @@ Pool.prototype._getWorker = function (affinity) {
     if (this.gradualScaling === 0) {
       worker = this._createWorkerHandler();
       workers.push(worker);
-      chosenWorker = worker;
+      chosenWorker = chosenWorker || worker;
     } else if (this.canCreateWorker) {
       this.canCreateWorker = false;
       setTimeout(() => (this.canCreateWorker = true), this.gradualScaling);
       worker = this._createWorkerHandler();
       workers.push(worker);
-      chosenWorker = worker;
+      chosenWorker = chosenWorker || worker;
     }
   }
-
+  if (!chosenWorker || !chosenWorker.available()) {
+    return;
+  }
   return chosenWorker;
 };
 
@@ -322,8 +349,9 @@ Pool.prototype.wstats = function () {
     if (statObj.lastTime < worker.lastTime) {
       statObj.lastTime = worker.lastTime;
     }
-    statObj.totalUtil +=
-      worker.worker.performance.eventLoopUtilization().utilization;
+    statObj.totalUtil += worker.worker.performance
+      ? worker.worker.performance.eventLoopUtilization().utilization
+      : 0;
   }
 
   statObj.avgUtil = statObj.totalUtil / workers.length;
@@ -419,6 +447,16 @@ Pool.prototype.terminate = function (force, timeout) {
 };
 
 /**
+ * Retrieve the number of available workers.
+ * @return {number}
+ */
+Pool.prototype.getNumberAvailableWorkers = function () {
+  return this.workers.filter(function (worker) {
+    return worker.available();
+  }).length;
+};
+
+/**
  * Retrieve statistics on tasks and workers.
  * @return {{totalWorkers: number, busyWorkers: number, idleWorkers: number, pendingTasks: number, activeTasks: number}} Returns an object with statistics
  */
@@ -431,6 +469,7 @@ Pool.prototype.stats = function () {
   return {
     totalWorkers: totalWorkers,
     busyWorkers: busyWorkers,
+    availableWorkers: this.getNumberAvailableWorkers(),
     idleWorkers: totalWorkers - busyWorkers,
 
     pendingTasks: this.tasks.length,
@@ -464,7 +503,7 @@ Pool.prototype._createWorkerHandler = function () {
       script: this.script,
     }) || {};
 
-  return new WorkerHandler(overridenParams.script || this.script, {
+  const worker = new WorkerHandler(overridenParams.script || this.script, {
     forkArgs: overridenParams.forkArgs || this.forkArgs,
     forkOpts: overridenParams.forkOpts || this.forkOpts,
     workerThreadOpts: overridenParams.workerThreadOpts || this.workerThreadOpts,
@@ -473,7 +512,24 @@ Pool.prototype._createWorkerHandler = function () {
     ),
     workerType: this.workerType,
     concurrency: this.concurrency,
+    maxExec: overridenParams.maxExec || this.maxExec,
+    markNotReadyAfterExec:
+      overridenParams.markNotReadyAfterExec == null
+        ? this.markNotReadyAfterExec
+        : overridenParams.markNotReadyAfterExec,
+    readyTimeoutDuration:
+      overridenParams.readyTimeoutDuration || this.readyTimeoutDuration,
+    initReadyTimeoutDuration:
+      overridenParams.initReadyTimeoutDuration || this.initReadyTimeoutDuration,
+    onWorkerExit: () => {
+      this._removeWorker(worker);
+    },
+    onWorkerReady: () => {
+      this._next();
+    },
   });
+
+  return worker;
 };
 
 /**

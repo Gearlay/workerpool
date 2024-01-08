@@ -77,6 +77,9 @@ if (
 }
 
 function convertError(error) {
+  if (typeof error === "string") {
+    return error;
+  }
   return Object.getOwnPropertyNames(error).reduce(function (product, name) {
     return Object.defineProperty(product, name, {
       value: error[name],
@@ -203,7 +206,12 @@ worker.emit = function (payload) {
   }
 };
 
+worker.ready = function () {
+  worker.send("ready");
+};
+
 if (typeof exports !== "undefined") {
   exports.add = worker.register;
   exports.emit = worker.emit;
+  exports.ready = worker.ready;
 }

@@ -25,7 +25,6 @@ var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
  * @property {boolean} [markNotReadyAfterExec] Default false. If true will mark the worker as not ready after an execution finishes. It then expects the worker to signal ready afterwards
  * @property {number} [readyTimeoutDuration] if not set or set to 0 will not have a ready timeout
  * @property {number} [initReadyTimeoutDuration] defaults to `readyTimeoutDuration`
- * @property {boolean} [respectAvailability] if true if no worker is available the task is queued otherwise it sends tasks fullblast without respecting availability/concurrency. defaults to !roundrobin
 /**
  * A pool to manage workers
  * @param {String} [script]   Optional worker script
@@ -51,10 +50,6 @@ function Pool(script, options) {
   this.debugPortStart = options.debugPortStart || 43210;
   this.nodeWorker = options.nodeWorker;
   this.roundrobin = options.roundrobin;
-  this.respectAvailability =
-    options.respectAvailability == null
-      ? !options.roundrobin
-      : options.respectAvailability;
   this.workerType = options.workerType || options.nodeWorker || "auto";
   this.maxQueueSize = options.maxQueueSize || Infinity;
   this.concurrency = options.concurrency;
@@ -275,25 +270,24 @@ Pool.prototype._next = function () {
  */
 Pool.prototype._getWorker = function (affinity) {
   var workers = this.workers;
-  let availableWorker;
-  let fallbackWorker;
+  let chosenWorker;
 
   // Affinity trumps roundrobin
   if (affinity != null) {
-    availableWorker = workers[affinity % workers.length];
+    chosenWorker = workers[affinity % workers.length];
   }
 
-  if (!availableWorker) {
-    var offset = this.roundrobin ? this.lastChosen + 1 : 0;
+  if (!chosenWorker && this.roundrobin && workers.length > 0) {
+    chosenWorker =
+      workers[(this.lastChosen = ++this.lastChosen % workers.length)];
+  }
+
+  if (!chosenWorker) {
     for (var i = 0; i < workers.length; i++) {
-      const workerIndex = (i + offset) % workers.length;
-      var worker = workers[workerIndex];
+      var worker = workers[i];
       if (worker.available()) {
-        this.lastChosen = workerIndex;
-        availableWorker = worker;
+        chosenWorker = worker;
         break;
-      } else if (!worker.terminated) {
-        fallbackWorker = fallbackWorker || worker;
       }
     }
   }
@@ -303,24 +297,16 @@ Pool.prototype._getWorker = function (affinity) {
     if (this.gradualScaling === 0) {
       worker = this._createWorkerHandler();
       workers.push(worker);
-      fallbackWorker = worker;
+      chosenWorker = chosenWorker || worker;
     } else if (this.canCreateWorker) {
       this.canCreateWorker = false;
       setTimeout(() => (this.canCreateWorker = true), this.gradualScaling);
       worker = this._createWorkerHandler();
       workers.push(worker);
-      fallbackWorker = worker;
+      chosenWorker = chosenWorker || worker;
     }
   }
-  if (availableWorker) {
-    return availableWorker;
-  }
-  if (
-    fallbackWorker &&
-    (!this.respectAvailability || fallbackWorker.available())
-  ) {
-    return fallbackWorker;
-  }
+  return chosenWorker;
 };
 
 /**

@@ -258,9 +258,9 @@ function WorkerHandler(script, _options) {
       : options.initReadyTimeoutDuration;
 
   let _onWorkerExit = options.onWorkerExit;
-  this.onWorkerExit = function () {
+  this.onWorkerExit = function (error) {
     if (_onWorkerExit) {
-      _onWorkerExit();
+      _onWorkerExit(error);
     }
     _onWorkerExit = null;
   };
@@ -378,7 +378,7 @@ function WorkerHandler(script, _options) {
       }
     }
     me.processing = Object.create(null);
-    me.onWorkerExit();
+    me.onWorkerExit(error);
   }
 
   // send all queued requests to worker
@@ -404,7 +404,11 @@ function WorkerHandler(script, _options) {
     message += "    stdout: `" + worker.stdout + "`\n";
     message += "    stderr: `" + worker.stderr + "`\n";
 
-    onError(new Error(message));
+    const error = new Error(message);
+    error.exitCode = exitCode;
+    error.signalCode = signalCode;
+
+    onError(error);
   });
 
   this.processing = Object.create(null); // queue with tasks currently in progress

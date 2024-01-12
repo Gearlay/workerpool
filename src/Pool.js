@@ -5,6 +5,8 @@ var DebugPortAllocator = require("./debug-port-allocator");
 var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
 
 /**
+ * @callback OnWorkerExit
+ * @param {*} [error]
  * @typedef {"auto" | "thread" | "thread" | "web"} WorkerType
  * @typedef {Object} WorkerPoolOptions
  * @property {string[]} [forkArgs]
@@ -26,6 +28,8 @@ var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
  * @property {number} [readyTimeoutDuration] if not set or set to 0 will not have a ready timeout
  * @property {number} [initReadyTimeoutDuration] defaults to `readyTimeoutDuration`
  * @property {boolean} [respectAvailability] if true if no worker is available the task is queued otherwise it sends tasks fullblast without respecting availability/concurrency. defaults to !roundrobin
+ * @property {OnWorkerExit} [onWorkerExit] called when a worker exits
+ */
 /**
  * A pool to manage workers
  * @param {String} [script]   Optional worker script
@@ -68,6 +72,7 @@ function Pool(script, options) {
 
   this.onCreateWorker = options.onCreateWorker || (() => null);
   this.onTerminateWorker = options.onTerminateWorker || (() => null);
+  this.onWorkerExit = options.onWorkerExit;
 
   // configuration
   if (options && "maxWorkers" in options) {
@@ -537,8 +542,9 @@ Pool.prototype._createWorkerHandler = function () {
       overridenParams.readyTimeoutDuration || this.readyTimeoutDuration,
     initReadyTimeoutDuration:
       overridenParams.initReadyTimeoutDuration || this.initReadyTimeoutDuration,
-    onWorkerExit: () => {
+    onWorkerExit: (error) => {
       this._removeWorker(worker);
+      this.onWorkerExit?.(error);
     },
     onWorkerReady: () => {
       this._next();

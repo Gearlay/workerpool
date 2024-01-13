@@ -505,6 +505,7 @@ Pool.prototype._createWorkerHandler = function () {
       script: this.script,
     }) || {};
 
+  console.info("Creating new worker for script", this.script);
   const worker = new WorkerHandler(overridenParams.script || this.script, {
     forkArgs: overridenParams.forkArgs || this.forkArgs,
     forkOpts: overridenParams.forkOpts || this.forkOpts,

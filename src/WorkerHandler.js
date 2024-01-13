@@ -370,6 +370,12 @@ function WorkerHandler(script, _options) {
 
   // reject all running tasks on worker error
   function onError(error) {
+    console.warn(
+      "Worker exited for script",
+      me.script,
+      "(This might be expected)\n",
+      error
+    );
     me.terminated = true;
 
     for (var id in me.processing) {

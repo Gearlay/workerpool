@@ -505,8 +505,8 @@ WorkerHandler.prototype.busy = function () {
 WorkerHandler.prototype.available = function () {
   return (
     this.worker &&
-    !this.worker.terminated &&
-    !this.worker.terminating &&
+    !this.terminated &&
+    !this.terminating &&
     this.worker.ready &&
     (!this.maxExec || this.requestCount < this.maxExec) &&
     !this.busy()

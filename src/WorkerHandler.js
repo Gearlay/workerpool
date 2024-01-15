@@ -370,6 +370,12 @@ function WorkerHandler(script, _options) {
 
   // reject all running tasks on worker error
   function onError(error) {
+    console.warn(
+      "Worker exited for script",
+      me.script,
+      "(This might be expected)\n",
+      error
+    );
     me.terminated = true;
 
     for (var id in me.processing) {
@@ -505,8 +511,8 @@ WorkerHandler.prototype.busy = function () {
 WorkerHandler.prototype.available = function () {
   return (
     this.worker &&
-    !this.worker.terminated &&
-    !this.worker.terminating &&
+    !this.terminated &&
+    !this.terminating &&
     this.worker.ready &&
     (!this.maxExec || this.requestCount < this.maxExec) &&
     !this.busy()

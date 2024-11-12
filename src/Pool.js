@@ -12,7 +12,7 @@ var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
  * @property {import('worker_threads').WorkerOptions} [workerThreadOpts]
  * @property {number} [debugPortStart]
  * @property {WorkerType} [nodeWorker] alias to workerType
- * @property {boolean} [roundrobin]
+ * @property {boolean} [fallbackRoundrobin]
  * @property {WorkerType} [workerType]
  * @property {number} [maxQueueSize]
  * @property {number} [concurrency]
@@ -49,7 +49,7 @@ function Pool(script, options) {
   this.workerThreadOpts = Object.freeze(options.workerThreadOpts || {});
   this.debugPortStart = options.debugPortStart || 43210;
   this.nodeWorker = options.nodeWorker;
-  this.roundrobin = options.roundrobin;
+  this.fallbackRoundrobin = options.fallbackRoundrobin;
   this.workerType = options.workerType || options.nodeWorker || "auto";
   this.maxQueueSize = options.maxQueueSize || Infinity;
   this.concurrency = options.concurrency;
@@ -272,14 +272,9 @@ Pool.prototype._getWorker = function (affinity) {
   var workers = this.workers;
   let chosenWorker;
 
-  // Affinity trumps roundrobin
+  // Affinity trumps fallbackRoundrobin
   if (affinity != null) {
     chosenWorker = workers[affinity % workers.length];
-  }
-
-  if (!chosenWorker && this.roundrobin && workers.length > 0) {
-    chosenWorker =
-      workers[(this.lastChosen = ++this.lastChosen % workers.length)];
   }
 
   if (!chosenWorker) {
@@ -287,9 +282,15 @@ Pool.prototype._getWorker = function (affinity) {
       var worker = workers[i];
       if (worker.available()) {
         chosenWorker = worker;
+        this.lastChosen = i;
         break;
       }
     }
+  }
+
+  if (!chosenWorker && this.fallbackRoundrobin && workers.length > 0) {
+    chosenWorker =
+      workers[(this.lastChosen = ++this.lastChosen % workers.length)];
   }
 
   if (workers.length < this.maxWorkers) {

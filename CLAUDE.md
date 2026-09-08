@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Gearlay's fork of `josdejong/workerpool` (remote `upstream`, published under the original name). `README.md` and `HISTORY.md` are upstream's and do **not** document anything the fork added, so treat them as reference for the original API only.
 
+> **Name the repo on every `gh` command that opens something.** In a fork, `gh` resolves the default repo to the upstream **parent**, so a bare `gh pr create` opens a pull request against the public `josdejong/workerpool` and publishes this fork's whole diff there. Always:
+>
+> ```bash
+> gh pr create --repo Gearlay/workerpool --base master --head <branch>
+> ```
+>
+> then check that the URL it prints is a `Gearlay/workerpool` one. This has already happened once, and it cannot be undone. A fork shares one object store with its parent and GitHub pins the commits at `refs/pull/<n>/head`, so the diff stays readable at an upstream URL after the PR is closed, after its body is redacted, after a force push, and after the branch is deleted. Only GitHub Support can remove a pull request record. Treat opening a PR here as publishing to the internet.
+
 Fork-only additions, all in `Pool.js` / `WorkerHandler.js`:
 
 | Option / API | Effect |

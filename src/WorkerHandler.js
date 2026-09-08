@@ -250,6 +250,8 @@ function WorkerHandler(script, _options) {
   this.minTime = Infinity;
   this.maxTime = 0;
   this.lastTime = 0;
+  this.lastEnded = 0; // when the most recent task finished, so the pool can find the newest lastTime
+  this.lastElu = null; // previous event loop utilization sample, worker_threads only
   this.markNotReadyAfterExec = options.markNotReadyAfterExec || false;
   this.readyTimeoutDuration = options.readyTimeoutDuration;
   this.initReadyTimeoutDuration =
@@ -323,9 +325,11 @@ function WorkerHandler(script, _options) {
           }
         } else {
           const opts = me.processing[id];
-          const timeSpent = Date.now() - opts.started;
+          const finished = Date.now();
+          const timeSpent = finished - opts.started;
 
           me.lastTime = timeSpent;
+          me.lastEnded = finished;
           if (timeSpent > me.maxTime) {
             me.maxTime = timeSpent;
           }
@@ -517,6 +521,34 @@ WorkerHandler.prototype.available = function () {
     (!this.maxExec || this.requestCount < this.maxExec) &&
     !this.busy()
   );
+};
+
+/**
+ * Event loop utilization of this worker, as fractions between 0 and 1:
+ * `lifetime` covers everything since the worker started, `window` covers the
+ * interval since the previous call to this method. The first call has no
+ * previous sample to measure against, so its two values are the same.
+ *
+ * Only a worker_thread can measure this. A child process or web worker has no
+ * equivalent and returns null rather than 0, so callers can leave it out of an
+ * average instead of skewing it.
+ *
+ * Reading advances the window, so poll this from one place and share the result.
+ *
+ * @return {{lifetime: number, window: number} | null} utilization
+ */
+WorkerHandler.prototype.utilization = function () {
+  if (!this.worker || !this.worker.performance) {
+    return null;
+  }
+
+  var elu = this.worker.performance.eventLoopUtilization();
+  var since = this.lastElu
+    ? this.worker.performance.eventLoopUtilization(elu, this.lastElu)
+    : elu;
+
+  this.lastElu = elu;
+  return { lifetime: elu.utilization, window: since.utilization };
 };
 
 /**

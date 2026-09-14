@@ -310,27 +310,48 @@ Pool.prototype._getWorker = function (affinity) {
 };
 
 /**
- * Get an available worker. If no worker is available and the maximum number
- * of workers isn't yet reached, a new worker will be created and returned.
- * If no worker is available and the maximum number of workers is reached,
- * null will be returned.
+ * Retrieve timing and utilization statistics aggregated over the pool's live
+ * workers. Workers that have been terminated but not yet dropped from the pool
+ * are skipped.
  *
- * @return {WorkerHandler | null} worker
- * @private
+ * `totalTime` and `requestCount` are cumulative, while `minTime` and `maxTime`
+ * only cover the current window, because WorkerHandler resets those two on an
+ * interval. `requestCount` counts tasks sent, including the ones still running.
+ * Utilization comes in two flavours, both averaged, bracketed and summed over
+ * the workers that can report it, which means worker_threads only, and all 0
+ * when nothing reported. The `Util` fields cover the interval since the
+ * previous `wstats()` call, so they say how busy the pool has been lately. The
+ * `LifetimeUtil` fields cover everything since each worker started, so they say
+ * how busy the pool has been overall. `total` is the sum across workers, which
+ * runs from 0 to the number of reporting workers, so 3 busy threads out of 4
+ * reads as a total of 3 and an average of 0.75.
+ *
+ * Reading advances the window, so poll `wstats()` from one place and share the
+ * result. Two callers polling it steal each other's intervals.
+ *
+ * @return {{totalTime: number, minTime: number, lastTime: number, maxTime: number, requestCount: number, workerCount: number, workerMax: number, workersReady: number, totalUtil: number, avgUtil: number, minUtil: number, maxUtil: number, totalLifetimeUtil: number, avgLifetimeUtil: number, minLifetimeUtil: number, maxLifetimeUtil: number}} Returns an object with statistics
  */
 Pool.prototype.wstats = function () {
   var workers = this.workers;
   const statObj = {
     totalTime: 0,
-    minTime: 0,
+    minTime: Infinity,
     lastTime: 0,
     maxTime: 0,
     requestCount: 0,
     totalUtil: 0,
+    minUtil: Infinity,
+    maxUtil: 0,
+    totalLifetimeUtil: 0,
+    minLifetimeUtil: Infinity,
+    maxLifetimeUtil: 0,
     workerCount: this.workers.length,
     workerMax: this.maxWorkers,
     workersReady: 0,
   };
+
+  var utilWorkers = 0;
+  var lastEnded = 0;
 
   for (var i = 0; i < workers.length; i++) {
     const worker = workers[i];
@@ -348,15 +369,47 @@ Pool.prototype.wstats = function () {
       statObj.maxTime = worker.maxTime;
     }
 
-    if (statObj.lastTime < worker.lastTime) {
+    // the duration of the pool's most recent task, not the largest of the
+    // per-worker last durations
+    if (worker.lastEnded > lastEnded) {
+      lastEnded = worker.lastEnded;
       statObj.lastTime = worker.lastTime;
     }
-    statObj.totalUtil += worker.worker.performance
-      ? worker.worker.performance.eventLoopUtilization().utilization
-      : 0;
+
+    const utilization = worker.utilization();
+    if (utilization !== null) {
+      utilWorkers++;
+
+      statObj.totalUtil += utilization.window;
+      statObj.minUtil = Math.min(statObj.minUtil, utilization.window);
+      statObj.maxUtil = Math.max(statObj.maxUtil, utilization.window);
+
+      statObj.totalLifetimeUtil += utilization.lifetime;
+      statObj.minLifetimeUtil = Math.min(
+        statObj.minLifetimeUtil,
+        utilization.lifetime
+      );
+      statObj.maxLifetimeUtil = Math.max(
+        statObj.maxLifetimeUtil,
+        utilization.lifetime
+      );
+    }
   }
 
-  statObj.avgUtil = statObj.totalUtil / workers.length;
+  // no live worker has completed a task yet, so there is no minimum to report
+  if (statObj.minTime === Infinity) {
+    statObj.minTime = 0;
+  }
+
+  // same for utilization, which no worker reports unless it is a worker_thread
+  if (statObj.minUtil === Infinity) {
+    statObj.minUtil = 0;
+    statObj.minLifetimeUtil = 0;
+  }
+
+  statObj.avgUtil = utilWorkers > 0 ? statObj.totalUtil / utilWorkers : 0;
+  statObj.avgLifetimeUtil =
+    utilWorkers > 0 ? statObj.totalLifetimeUtil / utilWorkers : 0;
   return statObj;
 };
 

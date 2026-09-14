@@ -992,6 +992,239 @@ describe('Pool', function () {
     });
   });
 
+  describe('wstats', function () {
+    var WorkerThreads = tryRequire('worker_threads');
+    var pools = [];
+
+    function statsPool(script, options) {
+      var pool = new Pool(script, options);
+      pools.push(pool);
+      return pool;
+    }
+
+    // terminating a pool can hang (see CLAUDE.md), and a hanging hook would
+    // take the rest of the suite down with it, so stop waiting after a second
+    function terminateQuietly(pool) {
+      return new Promise(function (resolve) {
+        var settled = false;
+        function finish() {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        }
+
+        setTimeout(finish, 1000);
+        pool.terminate(true).then(finish, finish);
+      });
+    }
+
+    function delay(ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    }
+
+    afterEach(function () {
+      var terminating = pools.map(terminateQuietly);
+      pools = [];
+      return Promise.all(terminating);
+    });
+
+    it('should report zeros for a pool that has not run anything', function () {
+      var pool = statsPool({ maxWorkers: 4 });
+      var stats = pool.wstats();
+
+      assert.strictEqual(stats.workerCount, 0);
+      assert.strictEqual(stats.workerMax, 4);
+      assert.strictEqual(stats.workersReady, 0);
+      assert.strictEqual(stats.requestCount, 0);
+      assert.strictEqual(stats.totalTime, 0);
+      assert.strictEqual(stats.minTime, 0);
+      assert.strictEqual(stats.maxTime, 0);
+      assert.strictEqual(stats.lastTime, 0);
+      assert.strictEqual(stats.totalUtil, 0);
+      assert.strictEqual(stats.avgUtil, 0);
+      assert.strictEqual(stats.minUtil, 0);
+      assert.strictEqual(stats.maxUtil, 0);
+      assert.strictEqual(stats.totalLifetimeUtil, 0);
+      assert.strictEqual(stats.avgLifetimeUtil, 0);
+      assert.strictEqual(stats.minLifetimeUtil, 0);
+      assert.strictEqual(stats.maxLifetimeUtil, 0);
+    });
+
+    it('should report the fastest task in minTime', function () {
+      var pool = statsPool(__dirname + '/workers/simple.js', { maxWorkers: 1 });
+
+      return pool.exec('timeout', [150])
+          .then(function () {
+            return pool.exec('timeout', [10]);
+          })
+          .then(function () {
+            var stats = pool.wstats();
+
+            assert.ok(stats.minTime > 0, 'minTime should be a measured duration, got ' + stats.minTime);
+            assert.ok(stats.minTime < 100, 'minTime should be the fast task, got ' + stats.minTime);
+            assert.ok(stats.maxTime > stats.minTime, 'maxTime should be the slow task, got ' + stats.maxTime);
+          });
+    });
+
+    it('should report the most recent task in lastTime, not the slowest one', function () {
+      var pool = statsPool(__dirname + '/workers/simple.js', { minWorkers: 2, maxWorkers: 2 });
+
+      // pin the slow task to one worker and the fast one to the other, so the
+      // task that finished last is not the longest running task. affinity only
+      // reaches the pool for a named method, exec drops the options of a
+      // stringified function
+      return pool.exec('timeout', [150], { affinity: 0 })
+          .then(function () {
+            return pool.exec('timeout', [10], { affinity: 1 });
+          })
+          .then(function () {
+            var stats = pool.wstats();
+
+            assert.strictEqual(stats.workerCount, 2);
+            assert.strictEqual(stats.requestCount, 2);
+            assert.ok(stats.lastTime < 100, 'lastTime should be the recent fast task, got ' + stats.lastTime);
+            assert.ok(stats.maxTime > 100, 'maxTime should still be the slow task, got ' + stats.maxTime);
+            assert.strictEqual(stats.lastTime, stats.minTime);
+          });
+    });
+
+    it('should average utilization over the workers that reported it', function () {
+      var pool = statsPool(__dirname + '/workers/simple.js', { minWorkers: 2, maxWorkers: 2 });
+
+      return pool.exec('add', [1, 2], { affinity: 0 }).then(function () {
+        // a worker that has been shut down but is still listed in the pool
+        // must not count towards the average
+        pool.workers[1].terminate(true);
+
+        var stats = pool.wstats();
+
+        assert.strictEqual(stats.workerCount, 2);
+        assert.strictEqual(stats.avgUtil, stats.totalUtil, 'only the one live worker should count');
+
+        if (pool.workers[0].worker.performance) {
+          assert.ok(stats.totalUtil > 0, 'the live worker should have reported utilization');
+        }
+      });
+    });
+
+    it('should leave workers that cannot measure utilization out of the average', function () {
+      var pool = statsPool(__dirname + '/workers/simple.js', { workerType: 'process', maxWorkers: 1 });
+
+      return pool.exec('add', [2, 3]).then(function (result) {
+        assert.strictEqual(result, 5);
+
+        // a child process has no eventLoopUtilization, so it reports null and
+        // stays out of the averages rather than dragging them towards zero
+        assert.strictEqual(pool.workers[0].utilization(), null);
+
+        var stats = pool.wstats();
+
+        assert.strictEqual(stats.totalUtil, 0);
+        assert.strictEqual(stats.avgUtil, 0);
+        assert.strictEqual(stats.minUtil, 0);
+        assert.strictEqual(stats.maxUtil, 0);
+        assert.strictEqual(stats.totalLifetimeUtil, 0);
+        assert.strictEqual(stats.avgLifetimeUtil, 0);
+        assert.strictEqual(stats.minLifetimeUtil, 0);
+        assert.strictEqual(stats.maxLifetimeUtil, 0);
+        assert.strictEqual(stats.workersReady, 1);
+        assert.ok(stats.minTime > 0, 'minTime should be a measured duration, got ' + stats.minTime);
+      });
+    });
+
+    if (WorkerThreads) {
+      it('should report the spread between the busiest and the quietest worker', function () {
+        var pool = statsPool(__dirname + '/workers/simple.js', {
+          workerType: 'thread',
+          minWorkers: 2,
+          maxWorkers: 2,
+        });
+
+        function spin() {
+          var end = Date.now() + 200;
+          while (Date.now() < end) {}
+          return 'done';
+        }
+
+        return pool.exec('add', [1, 2], { affinity: 0 })
+            .then(function () {
+              pool.wstats(); // prime the utilization samples of both workers
+
+              // exec drops the options of a stringified function, so call the
+              // worker's built-in run method by name to keep the affinity
+              return pool.exec('run', [String(spin), []], { affinity: 0 });
+            })
+            .then(function (result) {
+              assert.strictEqual(result, 'done');
+
+              var stats = pool.wstats();
+
+              if (!pool.workers[0].worker.performance) {
+                assert.strictEqual(stats.minUtil, 0);
+                assert.strictEqual(stats.maxUtil, 0);
+                return;
+              }
+
+              // one worker spun for 200ms while the other sat idle
+              assert.ok(stats.maxUtil > 0.5, 'the busy worker should peak high, got ' + stats.maxUtil);
+              assert.ok(stats.minUtil < 0.2, 'the idle worker should bottom out low, got ' + stats.minUtil);
+              assert.ok(stats.avgUtil > stats.minUtil, 'the average should sit above the minimum');
+              assert.ok(stats.avgUtil < stats.maxUtil, 'the average should sit below the maximum');
+
+              // the lifetime spread tells the same story over a longer window
+              assert.ok(stats.maxLifetimeUtil > stats.minLifetimeUtil, 'the busy worker should lead on lifetime too');
+              assert.ok(stats.avgLifetimeUtil > stats.minLifetimeUtil, 'the lifetime average should sit above its minimum');
+              assert.ok(stats.avgLifetimeUtil < stats.maxLifetimeUtil, 'the lifetime average should sit below its maximum');
+            });
+      });
+
+      it('should report event loop utilization per interval, not per worker lifetime', function () {
+        var pool = statsPool(__dirname + '/workers/simple.js', { workerType: 'thread', maxWorkers: 1 });
+
+        function spin() {
+          var end = Date.now() + 200;
+          while (Date.now() < end) {}
+          return 'done';
+        }
+
+        return pool.exec(spin).then(function (result) {
+          assert.strictEqual(result, 'done');
+
+          var busy = pool.wstats();
+
+          // worker.performance arrived in node 15. older versions cannot
+          // measure utilization at all and have to report 0 rather than NaN
+          if (!pool.workers[0].worker.performance) {
+            assert.strictEqual(busy.avgUtil, 0);
+            assert.strictEqual(busy.avgLifetimeUtil, 0);
+            return;
+          }
+
+          assert.ok(busy.avgUtil > 0.3, 'the busy interval should report real utilization, got ' + busy.avgUtil);
+
+          // a single reporting worker makes the spread collapse onto the average
+          assert.strictEqual(busy.minUtil, busy.avgUtil);
+          assert.strictEqual(busy.maxUtil, busy.avgUtil);
+
+          return delay(200).then(function () {
+            var idle = pool.wstats();
+
+            assert.ok(idle.avgUtil < 0.2, 'the idle interval should report low utilization, got ' + idle.avgUtil);
+            assert.ok(idle.avgUtil < busy.avgUtil, 'utilization should drop once the worker goes idle');
+            assert.ok(idle.maxUtil < busy.maxUtil, 'the peak should drop once the worker goes idle');
+
+            // the window forgets the spin, the lifetime figure still carries it
+            assert.ok(idle.avgLifetimeUtil > 0.3, 'lifetime utilization should still reflect the spin, got ' + idle.avgLifetimeUtil);
+            assert.ok(idle.avgLifetimeUtil > idle.avgUtil, 'lifetime should outrank the idle window');
+          });
+        });
+      });
+    }
+  });
+
   it('should throw an error in case of wrong type of arguments in function exec', function () {
     var pool = createPool();
     assert.throws(function () {pool.exec()}, TypeError);

@@ -49,7 +49,7 @@ declare class WorkerHandler {
     terminating: boolean;
     terminated: boolean;
     cleaning: boolean;
-    terminationHandler: Function | null;
+    terminationHandler: any;
     lastId: number;
     /**
      * Get a list with methods available on the worker.

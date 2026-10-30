@@ -389,7 +389,6 @@ function WorkerHandler(script, _options) {
   // reject all running tasks on worker error
   function onError(error) {
     console.warn("Worker exited for script", me.script, "(This might be expected)\n", error);
-    var unexpected = !me.cleaning;
     me.terminated = true;
 
     for (var id in me.processing) {
@@ -399,10 +398,7 @@ function WorkerHandler(script, _options) {
     }
 
     me.processing = Object.create(null);
-    // only a crash gets a replacement, not an exit this handler asked for
-    if (unexpected) {
-      me.onWorkerExit();
-    }
+    me.onWorkerExit();
   }
 
   // send all queued requests to worker
@@ -661,7 +657,14 @@ WorkerHandler.prototype.terminate = function (force, callback) {
   me.tracking = Object.create(null);
 
   if (typeof callback === 'function') {
-    this.terminationHandler = callback;
+    // the pool's replacement hook terminates a worker that is already shutting down; both callers get called back
+    var previousHandler = this.terminationHandler;
+    this.terminationHandler = previousHandler
+      ? function (err, worker) {
+        previousHandler(err, worker);
+        callback(err, worker);
+      }
+      : callback;
   }
   if (!this.busy()) {
     // all tasks are finished. kill the worker
@@ -676,8 +679,10 @@ WorkerHandler.prototype.terminate = function (force, callback) {
       }
       me.worker = null;
       me.terminating = false;
-      if (me.terminationHandler) {
-        me.terminationHandler(err, me);
+      var terminationHandler = me.terminationHandler;
+      me.terminationHandler = null;
+      if (terminationHandler) {
+        terminationHandler(err, me);
       } else if (err) {
         throw err;
       }

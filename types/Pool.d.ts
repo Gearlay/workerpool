@@ -168,6 +168,7 @@ declare class Pool {
         pendingTasks: number;
         activeTasks: number;
     };
+    private _notifyWorkerTerminated;
     private _ensureMinWorkers;
     private _createWorkerHandler;
     private _createQueue;

@@ -32,7 +32,7 @@ Fork-only additions:
 | `pool.wstats()` | Timing plus event-loop-utilization stats across live workers, avg/min/max/total for both the interval since the last call (`avgUtil`) and each worker's whole life (`avgLifetimeUtil`), backed by `WorkerHandler.utilization()` |
 | `stats().availableWorkers`, `getNumberAvailableWorkers()` | Count from `available()` rather than `busy()` |
 | `peek()` on the built-in queues | Lets `_next()` read the next task's `affinity` before choosing a worker; a custom `queueStrategy` without `peek` gets no affinity |
-| Crash replacement | A worker that exits on its own is removed and replaced up to `minWorkers` at once, instead of on its next failed task |
+| Worker replacement | Every worker that exits, whether it crashed, was retired or was terminated with its pool, is removed and replaced up to `minWorkers` at once. Intended: a pool with `minWorkers` never stays below it, even after `terminate()` |
 
 ## Commands
 
@@ -49,7 +49,7 @@ Install with `npm ci --ignore-scripts`. Tests require the real thing: they fork 
 
 ## Running the tests
 
-The full suite completes: **185 passing, 2 pending** on node 26. Two child-process tests are flaky upstream too (`should trigger event stdout in abort handler`, `should trigger event in abort handler`); pristine `v10.0.3` failed them in 2 of 3 runs. An `ERR_IPC_CHANNEL_CLOSED` printed after the summary is also upstream's: a child process from the last `WorkerHandler` test outlives the run.
+The full suite completes: **185 passing, 2 pending** on node 26. `.mocharc.js` sets `exit: true`, since pools with `minWorkers` bring their workers back after `terminate()` and those keep the process alive. Two child-process tests are flaky upstream too (`should trigger event stdout in abort handler`, `should trigger event in abort handler`); pristine `v10.0.3` failed them in 2 of 3 runs. An `ERR_IPC_CHANNEL_CLOSED` printed after the summary is also upstream's: a child process from the last `WorkerHandler` test outlives the run.
 
 The fork's own behavior is covered under `describe('fork scheduling options')` and `describe('wstats')` in `test/Pool.test.js`.
 
@@ -91,7 +91,9 @@ Those constants are declared separately in both `worker.js` and `WorkerHandler.j
 
 ### Exits
 
-`onWorkerExit` runs once per handler: on a crash (an `error` or `exit` event while the handler is not `cleaning`) and when `maxExec` is reached. The pool then removes the worker and tops up to `minWorkers`. An exit the handler asked for (`cleaning` is set) is not replaced, so terminating a pool does not respawn its workers.
+`onWorkerExit` runs once per handler: on every `error` or `exit` event, including an exit the handler asked for, and when `maxExec` is reached. The pool then removes the worker and tops up to `minWorkers`. That replacement is the fork's design, so terminating a pool with `minWorkers` leaves fresh workers behind; do not "fix" it.
+
+Under upstream's graceful shutdown the replacement hook calls `terminate()` on a worker that is already terminating. `terminate()` therefore chains a new callback onto a pending one instead of overwriting it (overwriting left `pool.terminate()` unresolved forever), and `cleanup()` clears the handler once it has run. The pool reports each worker to `onTerminateWorker` once (`_notifyWorkerTerminated`), though both the shutdown and the replacement see it.
 
 ## Conventions
 

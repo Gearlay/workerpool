@@ -1510,14 +1510,21 @@ describe('Pool', function () {
       });
     });
 
-    it('should not start new workers while the pool terminates', function () {
+    it('should finish terminating and bring the pool back to minWorkers', function () {
       var pool = createPool({ minWorkers: 2, maxWorkers: 2 });
+      var original = pool.workers.slice();
       return pool.exec(add, [1, 2]).then(function () {
         return pool.terminate();
       }).then(function () {
         return delay(100);
       }).then(function () {
-        assert.strictEqual(pool.workers.length, 0);
+        assert.strictEqual(pool.workers.length, 2);
+        pool.workers.forEach(function (worker) {
+          assert.ok(original.indexOf(worker) === -1, 'every worker should be a replacement');
+        });
+        return pool.exec(add, [3, 4]);
+      }).then(function (result) {
+        assert.strictEqual(result, 7);
       });
     });
 

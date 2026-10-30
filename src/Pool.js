@@ -421,12 +421,7 @@ Pool.prototype._removeWorker = function (worker) {
   // terminate the worker (if not already terminated)
   return new Promise(function (resolve, reject) {
     worker.terminate(false, function (err) {
-      me.onTerminateWorker({
-        forkArgs: worker.forkArgs,
-        forkOpts: worker.forkOpts,
-        workerThreadOpts: worker.workerThreadOpts,
-        script: worker.script,
-      });
+      me._notifyWorkerTerminated(worker);
       if (err) {
         reject(err);
       } else {
@@ -489,12 +484,7 @@ Pool.prototype.terminate = function (force, timeout) {
       .terminateAndNotify(force, timeout)
       .then(removeWorker)
       .always(function () {
-        me.onTerminateWorker({
-          forkArgs: worker.forkArgs,
-          forkOpts: worker.forkOpts,
-          workerThreadOpts: worker.workerThreadOpts,
-          script: worker.script,
-        });
+        me._notifyWorkerTerminated(worker);
       });
     promises.push(termPromise);
   });
@@ -520,6 +510,24 @@ Pool.prototype.stats = function () {
     pendingTasks: this.taskQueue.size(),
     activeTasks: busyWorkers,
   };
+};
+
+/**
+ * Call `onTerminateWorker` once for the worker, though a pool shutdown and its replacement both report it.
+ * @param {WorkerHandler} worker
+ * @private
+ */
+Pool.prototype._notifyWorkerTerminated = function (worker) {
+  if (worker.terminationReported) {
+    return;
+  }
+  worker.terminationReported = true;
+  this.onTerminateWorker({
+    forkArgs: worker.forkArgs,
+    forkOpts: worker.forkOpts,
+    workerThreadOpts: worker.workerThreadOpts,
+    script: worker.script,
+  });
 };
 
 /**

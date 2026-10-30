@@ -1,10 +1,10 @@
 var assert = require('assert');
-var Promise = require('../src/Promise');
+var {Promise} = require('../src/Promise');
 var WorkerHandler = require('../src/WorkerHandler');
 var path = require('path');
 var childProcess = require('child_process');
-var findProcess = require('find-process');
-const { CancellationError } = require('../src/Promise');
+var findProcess = require('find-process').default;
+const { CancellationError } = Promise;
 
 function add(a, b) {
   return a + b;
@@ -107,7 +107,7 @@ describe('WorkerHandler', function () {
     handler.exec('run', [String(add), [2, 4]])
         /*
         .then(function (result) {
-          assert('Should not complete request');
+          assert.fail('Should not complete request');
         })
         */
         .catch(function (err) {
@@ -119,6 +119,16 @@ describe('WorkerHandler', function () {
     handler.terminate(force);
 
     assert.strictEqual(handler.terminated, true);
+  });
+
+  it('should terminate before the worker is ready', function (done) {
+    var handler = new WorkerHandler(__dirname + '/workers/async.js', { workerType: 'process' });
+    handler.terminate(true);
+    assert.strictEqual(handler.requestQueue[0].message, '__workerpool-terminate__');
+    setTimeout(function () {
+      assert.strictEqual(handler.terminated, true);
+      done();
+    }, 100);
   });
 
   it('handle a promise based result', function (done) {
@@ -192,7 +202,7 @@ describe('WorkerHandler', function () {
 
     var promise = handler.exec('run', [String(forever)])
         .then(function () {
-          assert('promise should never resolve');
+          assert.fail('promise should never resolve');
         })
         //.catch(Promise.CancellationError, function (err) { // TODO: not yet supported
         .catch(function (err) {
@@ -220,7 +230,7 @@ describe('WorkerHandler', function () {
     handler.exec('run', [String(forever)])
         .timeout(50)
         .then(function () {
-          assert('promise should never resolve');
+          assert.fail('promise should never resolve');
         })
         //.catch(Promise.TimeoutError, function (err) { // TODO: not yet supported
         .catch(function (err) {
@@ -271,7 +281,7 @@ describe('WorkerHandler', function () {
 
     handler.exec('run', [String(add), [2, 4]])
         .then(function () {
-          assert('Promise should not be resolved');
+          assert.fail('Promise should not be resolved');
         })
         .catch(function (err) {
           assert(err instanceof Error);
@@ -296,7 +306,7 @@ describe('WorkerHandler', function () {
 
     handler.exec('run', [String(add), [2, 4]])
         .then(function () {
-          assert('Promise should not be resolved');
+          assert.fail('Promise should not be resolved');
         })
         .catch(function (err) {
           assert(err instanceof Error);
@@ -362,11 +372,13 @@ describe('WorkerHandler', function () {
   describe('setupBrowserWorker', function() {
     it('correctly sets up the browser worker', function() {
       var SCRIPT = 'the script';
+      var OPTIONS = { type: 'classic', credentials: 'omit', name: 'testWorker' }; // default WorkerOption values for type and credentials, custom name
       var postMessage;
       var addEventListener;
 
-      function Worker(script) {
+      function Worker(script, options) {
         assert.strictEqual(script, SCRIPT);
+        assert.strictEqual(options, OPTIONS);
       }
 
       Worker.prototype.addEventListener = function(eventName, callback) {
@@ -377,7 +389,7 @@ describe('WorkerHandler', function () {
         postMessage = message;
       };
 
-      var worker = WorkerHandler._setupBrowserWorker(SCRIPT, Worker);
+      var worker = WorkerHandler._setupBrowserWorker(SCRIPT, OPTIONS, Worker);
 
       assert.ok(worker instanceof Worker);
       assert.ok(typeof worker.on === 'function');
@@ -471,6 +483,34 @@ describe('WorkerHandler', function () {
       const worker = handler.worker;
       handler.terminate(true, () => {
         worker.emit('message', 'ready');
+        done();
+      });
+    });
+  });
+
+  describe('terminateAndNotify', function () {
+
+    it('promise should be resolved on termination', function (done) {
+      var handler = new WorkerHandler(__dirname + '/workers/async.js');
+
+      handler.terminateAndNotify(true)
+      .then(function () {
+        done();
+      }).catch(function (err) {
+        assert.fail('Promise should not be rejected');
+      });
+    });
+
+    it('promise should be rejected if notify timeout is smaller than worker timeout', function (done) {
+      var handler = new WorkerHandler(__dirname + '/workers/async.js', {
+        workerTerminateTimeout: 100
+      });
+
+      handler.terminateAndNotify(true, 50)
+      .then(function () {
+        assert.fail('Promise should not be resolved');
+      }).catch(function (err) {
+        assert.ok(err instanceof Promise.TimeoutError);
         done();
       });
     });

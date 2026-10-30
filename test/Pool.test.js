@@ -1,5 +1,5 @@
 var assert = require('assert');
-var Promise = require('../src/Promise');
+var {Promise} = require('../src/Promise');
 var Pool = require('../src/Pool');
 var tryRequire = require('./utils').tryRequire
 
@@ -8,19 +8,21 @@ function add(a, b) {
 }
 
 describe('Pool', function () {
-
   // Creating pool with this function ensures that the pool is terminated
   // at the end of the test, which avoid hanging the test suite if terminate()
-  // hadn't been called for some reasons
-  function createPool(poolParameters) {
-    var pool = new Pool(poolParameters);
-
-    after(() => {
-      return pool.terminate();
-    });
-
+  // hadn't been called for some reason
+  let createdPools = []
+  function createPool(script, options) {
+    const pool = new Pool(script, options);
+    createdPools.push(pool);
     return pool;
   }
+
+  afterEach(async () => {
+    while (createdPools.length > 0) {
+      await createdPools.shift().terminate();
+    }
+  });
 
   describe('nodeWorker', function() {
     function add(a,b) {
@@ -78,6 +80,15 @@ describe('Pool', function () {
       it('supports passing options to threads', function() {
         const maxYoungGenerationSizeMb = 200
         var pool = createPool({ minWorkers:1, workerType: 'thread', workerThreadOpts: { resourceLimits: { maxYoungGenerationSizeMb } } });
+        var worker = pool.workers[0].worker;
+
+        assert.strictEqual(worker.isWorkerThread, true);
+        assert.strictEqual(worker.resourceLimits.maxYoungGenerationSizeMb, maxYoungGenerationSizeMb);
+      });
+
+      it('supports passing options to threads via mode auto', function() {
+        const maxYoungGenerationSizeMb = 200
+        var pool = createPool({ minWorkers:1, workerType: 'auto', workerThreadOpts: { resourceLimits: { maxYoungGenerationSizeMb } } });
         var worker = pool.workers[0].worker;
 
         assert.strictEqual(worker.isWorkerThread, true);
@@ -142,6 +153,142 @@ describe('Pool', function () {
     });
   });
 
+  it('supports worker creation hook to pass dynamic options to threads (for example)', function() {
+    var counter = 0;
+    var terminatedWorkers = [];
+    var pool = createPool({
+      workerType: 'thread',
+      maxWorkers: 4, // make sure we can create enough workers (otherwise we could be limited by the number of CPUs)
+      onCreateWorker: (opts) => {
+        return {...opts, workerThreadOpts: {...opts.workerThreadOpts, env: { TEST_ENV: `env_value${counter++}` }}}
+      },
+      onTerminateWorker: (opts) => {
+        terminatedWorkers.push(opts.workerThreadOpts.env.TEST_ENV);
+      }
+    });
+
+    function getEnv() {
+      return process.env.TEST_ENV;
+    }
+
+    return Promise.all([
+      pool.exec(getEnv, []),
+      pool.exec(getEnv, []),
+      pool.exec(getEnv, [])
+    ]).then(function (result) {
+      assert.strictEqual(result.length, 3, 'The creation hook should be called 3 times');
+      assert(result.includes('env_value0'), 'result should include the value with counter = 0');
+      assert(result.includes('env_value1'), 'result should include the value with counter = 1');
+      assert(result.includes('env_value2'), 'result should include the value with counter = 2');
+      return pool.terminate();
+    }).then(function () {
+      assert.strictEqual(terminatedWorkers.length, 3, 'The termination hook should be called 3 times');
+      assert(terminatedWorkers.includes('env_value0'), 'terminatedWorkers should include the value with counter = 0');
+      assert(terminatedWorkers.includes('env_value1'), 'terminatedWorkers should include the value with counter = 1');
+      assert(terminatedWorkers.includes('env_value2'), 'terminatedWorkers should include the value with counter = 2');
+    });
+  });
+
+  it('supports stdout/stderr capture via fork', function(done) {
+    var pool = createPool(__dirname + '/workers/console.js', {workerType: 'process', emitStdStreams: true});
+
+    var receivedEvents = []
+    pool.exec("stdStreams", [], {
+      on: function (payload) {
+        receivedEvents.push(payload)
+      }
+    })
+    .then(function (result) {
+      assert.strictEqual(result, 'done');
+      assert.deepStrictEqual(receivedEvents, [{
+        stdout: 'stdout message\n'
+      }, {
+        stderr: 'stderr message\n'
+      }]);
+
+      pool.terminate();
+      done();
+    })
+    .catch(function (err) {
+      console.log(err);
+      assert.fail('Should not throw an error');
+      done(err);
+    });
+  })
+
+  it('excludes stdout/stderr capture via fork', function(done) {
+    var pool = createPool(__dirname + '/workers/console.js', {workerType: 'process'});
+
+    var receivedEvents = []
+    pool.exec("stdStreams", [], {
+      on: function (payload) {
+        receivedEvents.push(payload)
+      }
+    })
+    .then(function (result) {
+      assert.strictEqual(result, 'done');
+      assert.deepStrictEqual(receivedEvents, []);
+
+      pool.terminate();
+      done();
+    })
+    .catch(function (err) {
+      console.log(err);
+      assert.fail('Should not throw an error');
+      done(err);
+    });
+  })
+
+  it('supports stdout/stderr capture via threads', function(done) {
+    var pool = createPool(__dirname + '/workers/console.js', {workerType: 'threads', emitStdStreams: true});
+
+    var receivedEvents = []
+    pool.exec("stdStreams", [], {
+      on: function (payload) {
+        receivedEvents.push(payload)
+      }
+    })
+    .then(function (result) {
+      assert.strictEqual(result, 'done');
+      assert.deepStrictEqual(receivedEvents, [{
+        stdout: 'stdout message\n'
+      }, {
+        stderr: 'stderr message\n'
+      }]);
+
+      pool.terminate();
+      done();
+    })
+    .catch(function (err) {
+      console.log(err);
+      assert.fail('Should not throw an error');
+      done(err);
+    });
+  })
+
+  it('excludes stdout/stderr capture via threads', function(done) {
+    var pool = createPool(__dirname + '/workers/console.js', {workerType: 'threads'});
+
+    var receivedEvents = []
+    pool.exec("stdStreams", [], {
+      on: function (payload) {
+        receivedEvents.push(payload)
+      }
+    })
+    .then(function (result) {
+      assert.strictEqual(result, 'done');
+      assert.deepStrictEqual(receivedEvents, []);
+
+      pool.terminate();
+      done();
+    })
+    .catch(function (err) {
+      console.log(err);
+      assert.fail('Should not throw an error');
+      done(err);
+    });
+  })
+
   it('should offload a function to a worker', function (done) {
     var pool = createPool({maxWorkers: 10});
 
@@ -197,19 +344,19 @@ describe('Pool', function () {
       return a + b;
     }
 
-    assert.strictEqual(pool.tasks.length, 0);
+    assert.strictEqual(pool.taskQueue.size(), 0);
     assert.strictEqual(pool.workers.length, 0);
 
     var task1 = pool.exec(add, [3, 4]);
     var task2 = pool.exec(add, [2, 3]);
 
-    assert.strictEqual(pool.tasks.length, 0);
+    assert.strictEqual(pool.taskQueue.size(), 0);
     assert.strictEqual(pool.workers.length, 2);
 
     var task3 = pool.exec(add, [5, 7]);
     var task4 = pool.exec(add, [1, 1]);
 
-    assert.strictEqual(pool.tasks.length, 2);
+    assert.strictEqual(pool.taskQueue.size(), 2);
     assert.strictEqual(pool.workers.length, 2);
 
     Promise.all([
@@ -220,7 +367,7 @@ describe('Pool', function () {
         ])
         .then(function (results) {
           assert.deepStrictEqual(results, [7, 5, 12, 2]);
-          assert.strictEqual(pool.tasks.length, 0);
+          assert.strictEqual(pool.taskQueue.size(), 0);
           assert.strictEqual(pool.workers.length, 2);
 
           pool.terminate();
@@ -242,7 +389,7 @@ describe('Pool', function () {
             done();
           })
           .catch(function () {
-            assert('Should not throw an error');
+            assert.fail('Should not throw an error');
           });
     });
   });
@@ -271,7 +418,7 @@ describe('Pool', function () {
           })
           .catch(function (err) {
             console.log(err);
-            assert('Should not throw an error');
+            assert.fail('Should not throw an error');
           });
     });
   });
@@ -289,7 +436,7 @@ describe('Pool', function () {
           })
           .catch(function (err) {
             console.log(err);
-            assert('Should not throw an error');
+            assert.fail('Should not throw an error');
           });
     });
   });
@@ -311,6 +458,46 @@ describe('Pool', function () {
         });
   });
 
+  it('should handle a nested custom error class thrown by a worker', function (done) {
+    var pool = createPool();
+
+    function test() {
+      class CustomError {
+        constructor(message, details) {
+          this.message = message
+          this.details = details
+        }
+
+        toJSON = () => ({
+          message: this.message,
+          details: this.details
+        })
+      }
+
+      class  NestedCustomData {
+        constructor(value) {
+          this.value = value
+        }
+
+        toJSON = () => ({
+          value: this.value
+        })
+      }
+
+      throw new CustomError('Custom error', new NestedCustomData(42));
+    }
+
+    pool.exec(test)
+        .catch(function (err) {
+          assert.ok(err instanceof Error);
+          assert.strictEqual(err.message, 'Custom error');
+          assert.strictEqual(err.details.value, 42);
+
+          pool.terminate();
+          done();
+        });
+  });
+
   it('should execute a function returning a Promise', function (done) {
     var pool = createPool({maxWorkers: 10});
 
@@ -326,7 +513,7 @@ describe('Pool', function () {
           done();
         })
         .catch(function () {
-          assert('Should not throw an error');
+          assert.fail('Should not throw an error');
         });
   });
 
@@ -339,7 +526,7 @@ describe('Pool', function () {
 
     pool.exec(testAsync)
         .then(function () {
-          assert('Should not resolve');
+          assert.fail('Should not resolve');
         })
         .catch(function (err) {
           assert.strictEqual(err.toString(), 'Error: I reject!');
@@ -396,7 +583,7 @@ describe('Pool', function () {
           assert.strictEqual(reachedTheEnd, true);
 
           assert.strictEqual(pool.workers.length, 1);
-          assert.strictEqual(pool.tasks.length, 0);
+          assert.strictEqual(pool.taskQueue.size(), 0);
 
           return pool.terminate();
         })
@@ -406,15 +593,15 @@ describe('Pool', function () {
         .catch(done);
 
     assert.strictEqual(pool.workers.length, 1);
-    assert.strictEqual(pool.tasks.length, 0);
+    assert.strictEqual(pool.taskQueue.size(), 0);
 
     var p2 = pool.exec(one); // will be queued
     assert.strictEqual(pool.workers.length, 1);
-    assert.strictEqual(pool.tasks.length, 1);
+    assert.strictEqual(pool.taskQueue.size(), 1);
 
     p2.cancel();            // cancel immediately
     assert.strictEqual(pool.workers.length, 1);
-    assert.strictEqual(pool.tasks.length, 1);
+    assert.strictEqual(pool.taskQueue.size(), 1);
 
     reachedTheEnd = true;
   });
@@ -464,17 +651,17 @@ describe('Pool', function () {
           oneDone = true;
 
           assert.strictEqual(pool.workers.length, 1);
-          assert.strictEqual(pool.tasks.length, 1);
+          assert.strictEqual(pool.taskQueue.size(), 1);
 
           checkDone();
         });
 
     assert.strictEqual(pool.workers.length, 1);
-    assert.strictEqual(pool.tasks.length, 0);
+    assert.strictEqual(pool.taskQueue.size(), 0);
 
     var p2 = pool.exec(one); // will be queued
     assert.strictEqual(pool.workers.length, 1);
-    assert.strictEqual(pool.tasks.length, 1);
+    assert.strictEqual(pool.taskQueue.size(), 1);
 
     var p3 = pool.exec(two)
         .then(function (result) {
@@ -484,19 +671,54 @@ describe('Pool', function () {
           twoDone = true;
 
           assert.strictEqual(pool.workers.length, 1);
-          assert.strictEqual(pool.tasks.length, 0);
+          assert.strictEqual(pool.taskQueue.size(), 0);
 
           checkDone();
         });
 
     p2.cancel();            // cancel immediately
     assert.strictEqual(pool.workers.length, 1);
-    assert.strictEqual(pool.tasks.length, 2);
+    assert.strictEqual(pool.taskQueue.size(), 2);
 
     reachedTheEnd = true;
   });
 
     // TODO: test whether a task in the queue can be neatly cancelled
+
+  it('should not assign new tasks to a worker whose previous task was cancelled', function (done) {
+    // Regression test: when a task is cancelled, WorkerHandler moves it to
+    // `tracking` and schedules a force-terminate after `workerTerminateTimeout`.
+    // During that window the worker must not pick up new tasks — otherwise
+    // the forced termination would reject them with "Worker terminated"
+    // even though they had nothing to do with the original cancellation.
+    var pool = createPool({maxWorkers: 1, workerTerminateTimeout: 50});
+
+    function forever() {
+      while (1 > 0) {} // runs forever (so cancel must force-terminate)
+    }
+
+    function add(a, b) {
+      return a + b;
+    }
+
+    var p1 = pool.exec(forever).catch(function (err) {
+      assert(err instanceof Promise.CancellationError);
+    });
+
+    // Cancel after the worker has actually started running `forever`.
+    setTimeout(function () {
+      p1.cancel();
+
+      // Queue a follow-up task immediately to ensure that it queues until
+      // the worker finishes cleaning up the cancelled task.
+      pool.exec(add, [3, 4])
+        .then(function (result) {
+          assert.strictEqual(result, 7);
+          done();
+        })
+        .catch(done);
+    }, 25);
+  });
 
   it('should timeout a task', function () {
     var pool = createPool({maxWorkers: 10});
@@ -508,13 +730,14 @@ describe('Pool', function () {
     return pool.exec(forever)
         .timeout(50)
         .then(function (result) {
-          assert('promise should never resolve');
+          assert.fail('promise should never resolve');
         })
       //.catch(Promise.CancellationError, function (err) { // TODO: not yet supported
         .catch(function (err) {
           assert(err instanceof Promise.TimeoutError);
           // we cannot assert that no workers remain in the pool, because that happens
           // on a different promise chain (termination is now async)
+
         });
   });
 
@@ -552,7 +775,7 @@ describe('Pool', function () {
             .catch(done);
         })
         .catch(function (err) {
-          assert('promise should not throw');
+          assert.fail('promise should not throw');
         });
   });
 
@@ -575,7 +798,7 @@ describe('Pool', function () {
     pool.exec(sleep)
         .timeout(delay)
         .then(function (result) {
-          assert('promise should never resolve');
+          assert.fail('promise should never resolve');
         })
         .catch(function (err) {
           assert(err instanceof Promise.TimeoutError);
@@ -584,7 +807,7 @@ describe('Pool', function () {
         });
   });
 
-  it('should handle crashed workers (1)', function () {
+  it('should handle crashed workers', function () {
     var pool = createPool({maxWorkers: 1});
 
     var promise = pool.exec(add)
@@ -655,7 +878,7 @@ describe('Pool', function () {
 
       assert.strictEqual(pool.maxWorkers, 2);
       assert.strictEqual(pool.workers.length, 2);
-      assert.strictEqual(pool.tasks.length, 3);
+      assert.strictEqual(pool.taskQueue.size(), 3);
 
       return Promise.all(tasks).then(function () {
         return pool.terminate();
@@ -695,20 +918,223 @@ describe('Pool', function () {
     });
 
     it('should increase maxWorkers to match minWorkers', function () {
-      var pool = createPool({minWorkers: 16});
+      var cpus = require('os').cpus();
+      var count = cpus.length + 2;
+      var tasksCount = cpus.length * 2;
+      var pool = createPool({minWorkers: count});
 
       var tasks = []
-      for(var i=0;i<20;i++) {
+      for(var i=0;i<tasksCount;i++) {
         tasks.push(pool.exec(add, [i, i*2]));
       }
 
-      assert.strictEqual(pool.minWorkers, 16);
-      assert.strictEqual(pool.maxWorkers, 16);
-      assert.strictEqual(pool.workers.length, 16);
-      assert.strictEqual(pool.tasks.length, 4);
+      assert.strictEqual(pool.minWorkers, count);
+      assert.strictEqual(pool.maxWorkers, count);
+      assert.strictEqual(pool.workers.length, count);
+      assert.strictEqual(pool.taskQueue.size(), tasksCount - count);
 
       return Promise.all(tasks).then(function () {
         return pool.terminate();
+      });
+    });
+
+    describe('queueStrategy', function () {
+      it('should use FIFO queue strategy by default', function () {
+        var pool = createPool();
+
+        // Verify the queue type by checking behavior
+        assert.strictEqual(pool.taskQueue.constructor.name, 'FIFOQueue');
+
+        return pool.terminate();
+      });
+
+      it('should use FIFO queue strategy when explicitly specified', function () {
+        var pool = createPool({queueStrategy: 'fifo'});
+
+        assert.strictEqual(pool.taskQueue.constructor.name, 'FIFOQueue');
+
+        return pool.terminate();
+      });
+
+      it('should use LIFO queue strategy when specified', function () {
+        var pool = createPool({queueStrategy: 'lifo'});
+
+        assert.strictEqual(pool.taskQueue.constructor.name, 'LIFOQueue');
+
+        return pool.terminate();
+      });
+
+      it('should process tasks in FIFO order with fifo strategy', function () {
+        var pool = createPool({maxWorkers: 1, queueStrategy: 'fifo'});
+        var results = [];
+
+        function delayedAdd(a, b) {
+          return new Promise(function(resolve) {
+            setTimeout(function() {
+              resolve(a + b);
+            }, 10);
+          });
+        }
+
+        // Fill the queue with tasks
+        var task1 = pool.exec(delayedAdd, [1, 1]).then(function(result) { results.push(result); });
+        var task2 = pool.exec(delayedAdd, [2, 2]).then(function(result) { results.push(result); });
+        var task3 = pool.exec(delayedAdd, [3, 3]).then(function(result) { results.push(result); });
+        var task4 = pool.exec(delayedAdd, [4, 4]).then(function(result) { results.push(result); });
+
+        return Promise.all([task1, task2, task3, task4]).then(function() {
+          // FIFO should process tasks in order: 2, 4, 6, 8
+          assert.deepStrictEqual(results, [2, 4, 6, 8]);
+          return pool.terminate();
+        });
+      });
+
+      it('should process tasks in LIFO order with lifo strategy', function () {
+        var pool = createPool({maxWorkers: 1, queueStrategy: 'lifo'});
+        var results = [];
+
+        function delayedAdd(a, b) {
+          return new Promise(function(resolve) {
+            setTimeout(function() {
+              resolve(a + b);
+            }, 10);
+          });
+        }
+
+        // Fill the queue with tasks
+        var task1 = pool.exec(delayedAdd, [1, 1]).then(function(result) { results.push(result); });
+        var task2 = pool.exec(delayedAdd, [2, 2]).then(function(result) { results.push(result); });
+        var task3 = pool.exec(delayedAdd, [3, 3]).then(function(result) { results.push(result); });
+        var task4 = pool.exec(delayedAdd, [4, 4]).then(function(result) { results.push(result); });
+
+        return Promise.all([task1, task2, task3, task4]).then(function() {
+          // LIFO should process tasks in reverse order: 2, 8, 6, 4
+          assert.deepStrictEqual(results, [2, 8, 6, 4]);
+          return pool.terminate();
+        });
+      });
+
+      it('should accept custom queue strategy', function () {
+        // Create a priority queue that processes tasks with higher priority first
+        function PriorityQueue() {
+          this.tasks = [];
+        }
+
+        PriorityQueue.prototype.push = function(task) {
+          this.tasks.push(task);
+          this._sort();
+        };
+
+        PriorityQueue.prototype.pop = function() {
+          return this.tasks.shift();
+        };
+
+        PriorityQueue.prototype.size = function() {
+          return this.tasks.length;
+        };
+
+        PriorityQueue.prototype.contains = function(task) {
+          return this.tasks.includes(task);
+        };
+
+        PriorityQueue.prototype.clear = function() {
+          this.tasks.length = 0;
+        };
+
+        PriorityQueue.prototype._sort = function() {
+          var self = this;
+          this.tasks.sort(function(a, b) {
+            var priorityA = self._getPriority(a);
+            var priorityB = self._getPriority(b);
+            return priorityA - priorityB; // Lower number = higher priority
+          });
+        };
+
+        PriorityQueue.prototype._getPriority = function(task) {
+          if (task.options && task.options.metadata && typeof task.options.metadata.priority === 'number') {
+            return task.options.metadata.priority;
+          }
+          return 0; // Default priority
+        };
+
+        var customQueue = new PriorityQueue();
+        var pool = createPool({queueStrategy: customQueue});
+
+        assert.strictEqual(pool.taskQueue, customQueue);
+
+        return pool.terminate();
+      });
+
+      it('should process tasks according to priority queue behavior', function () {
+        // Create a priority queue that processes tasks based on metadata priority
+        function PriorityQueue() {
+          this.tasks = [];
+        }
+
+        PriorityQueue.prototype.push = function(task) {
+          this.tasks.push(task);
+          this._sort();
+        };
+
+        PriorityQueue.prototype.pop = function() {
+          return this.tasks.shift();
+        };
+
+        PriorityQueue.prototype.size = function() {
+          return this.tasks.length;
+        };
+
+        PriorityQueue.prototype.contains = function(task) {
+          return this.tasks.includes(task);
+        };
+
+        PriorityQueue.prototype.clear = function() {
+          this.tasks.length = 0;
+        };
+
+        PriorityQueue.prototype._sort = function() {
+          var self = this;
+          this.tasks.sort(function(a, b) {
+            var priorityA = self._getPriority(a);
+            var priorityB = self._getPriority(b);
+            return priorityA - priorityB; // Lower number = higher priority
+          });
+        };
+
+        PriorityQueue.prototype._getPriority = function(task) {
+          if (task.options && task.options.metadata && typeof task.options.metadata.priority === 'number') {
+            return task.options.metadata.priority;
+          }
+          return 5; // Default medium priority
+        };
+
+        var customQueue = new PriorityQueue();
+        var pool = createPool({maxWorkers: 1, queueStrategy: customQueue});
+        var results = [];
+
+        function delayedAdd(a, b) {
+          return new Promise(function(resolve) {
+            setTimeout(function() {
+              resolve(a + b);
+            }, 10);
+          });
+        }
+
+        // Add tasks with different priorities - the first task will start immediately, others will be queued
+        var task1 = pool.exec(delayedAdd, [1, 1], { metadata: { priority: 5 } }).then(function(result) { results.push(result); });
+        var task2 = pool.exec(delayedAdd, [2, 2], { metadata: { priority: 3 } }).then(function(result) { results.push(result); });
+        var task3 = pool.exec(delayedAdd, [3, 3], { metadata: { priority: 1 } }).then(function(result) { results.push(result); });
+        var task4 = pool.exec(delayedAdd, [4, 4], { metadata: { priority: 2 } }).then(function(result) { results.push(result); });
+
+        return Promise.all([task1, task2, task3, task4]).then(function() {
+          // With priority queue, execution order should be:
+          // task1 (2) - executed first as it started immediately (priority 5)
+          // task3 (6) - highest priority 1
+          // task4 (8) - priority 2
+          // task2 (4) - lowest priority 3
+          assert.deepStrictEqual(results, [2, 6, 8, 4]);
+          return pool.terminate();
+        });
       });
     });
   });
@@ -773,7 +1199,7 @@ describe('Pool', function () {
             // this will throw if the process with pid `workerPid` does not exist
             process.kill(workerPid, 0);
           });
-        
+
           done();
         })
         .catch(done);
@@ -923,12 +1349,12 @@ describe('Pool', function () {
     var promise2 = pool.exec(test2);
 
     assert.strictEqual(pool.workers.length, 1);
-    assert.strictEqual(pool.tasks.length, 1);
+    assert.strictEqual(pool.taskQueue.size(), 1);
 
     return pool.terminate(false)
       .then(function() {
         assert.strictEqual(pool.workers.length, 0);
-        assert.strictEqual(pool.tasks.length, 0);
+        assert.strictEqual(pool.taskQueue.size(), 0);
 
         return Promise.all([
           promise1.then(function (result) {
@@ -956,11 +1382,11 @@ describe('Pool', function () {
       });
     }
 
-    assert.deepStrictEqual(pool.stats(), {totalWorkers: 0, busyWorkers: 0, idleWorkers: 0, pendingTasks: 0, activeTasks: 0});
+    assert.deepStrictEqual(pool.stats(), {totalWorkers: 0, busyWorkers: 0, availableWorkers: 0, idleWorkers: 0, pendingTasks: 0, activeTasks: 0});
 
     var promise = pool.exec(test)
         .then(function () {
-          assert.deepStrictEqual(pool.stats(), {totalWorkers: 1, busyWorkers: 0, idleWorkers: 1, pendingTasks: 0, activeTasks: 0 });
+          assert.deepStrictEqual(pool.stats(), {totalWorkers: 1, busyWorkers: 0, availableWorkers: 1, idleWorkers: 1, pendingTasks: 0, activeTasks: 0 });
 
           // start six tasks (max workers is 4, so we should get pending tasks)
           var all = Promise.all([
@@ -972,23 +1398,150 @@ describe('Pool', function () {
             pool.exec(test)
           ]);
 
-          assert.deepStrictEqual(pool.stats(), {totalWorkers: 4, busyWorkers: 4, idleWorkers: 0, pendingTasks: 2, activeTasks: 4});
+          assert.deepStrictEqual(pool.stats(), {totalWorkers: 4, busyWorkers: 4, availableWorkers: 0, idleWorkers: 0, pendingTasks: 2, activeTasks: 4});
 
           return all;
         })
         .then(function () {
-          assert.deepStrictEqual(pool.stats(), {totalWorkers: 4, busyWorkers: 0, idleWorkers: 4, pendingTasks: 0, activeTasks: 0 });
+          assert.deepStrictEqual(pool.stats(), {totalWorkers: 4, busyWorkers: 0, availableWorkers: 4, idleWorkers: 4, pendingTasks: 0, activeTasks: 0 });
 
           return pool.exec(testError)
         })
         .catch(function () {
-          assert.deepStrictEqual(pool.stats(), {totalWorkers: 4, busyWorkers: 0, idleWorkers: 4, pendingTasks: 0, activeTasks: 0});
+          assert.deepStrictEqual(pool.stats(), {totalWorkers: 4, busyWorkers: 0, availableWorkers: 4, idleWorkers: 4, pendingTasks: 0, activeTasks: 0});
         });
 
-    assert.deepStrictEqual(pool.stats(), {totalWorkers: 1, busyWorkers: 1, idleWorkers: 0, pendingTasks: 0, activeTasks: 1});
+    assert.deepStrictEqual(pool.stats(), {totalWorkers: 1, busyWorkers: 1, availableWorkers: 0, idleWorkers: 0, pendingTasks: 0, activeTasks: 1});
 
     return promise.then(function () {
       return pool.terminate();
+    });
+  });
+
+  describe('fork scheduling options', function () {
+    var simple = __dirname + '/workers/simple.js';
+
+    function delay(ms) {
+      return new Promise(function (resolve) {
+        setTimeout(resolve, ms);
+      });
+    }
+
+    function requestCounts(pool) {
+      return pool.workers.map(function (worker) {
+        return worker.requestCount;
+      });
+    }
+
+    function runInSequence(count, run) {
+      var chain = run();
+      for (var i = 1; i < count; i++) {
+        chain = chain.then(run);
+      }
+      return chain;
+    }
+
+    it('should run up to concurrency tasks on one worker at once and queue the rest', function () {
+      var pool = createPool(simple, { maxWorkers: 1, concurrency: 3 });
+      return pool.exec('add', [1, 2]).then(function () {
+        var running = [
+          pool.exec('timeout', [100]),
+          pool.exec('timeout', [100]),
+          pool.exec('timeout', [100]),
+        ];
+        var queued = pool.exec('timeout', [100]);
+
+        assert.strictEqual(pool.workers.length, 1);
+        assert.strictEqual(Object.keys(pool.workers[0].processing).length, 3);
+        assert.strictEqual(pool.stats().pendingTasks, 1);
+        assert.strictEqual(pool.stats().busyWorkers, 1);
+
+        return Promise.all(running.concat([queued]));
+      });
+    });
+
+    it('should hand tasks to the workers in turn with roundrobin', function () {
+      var pool = createPool(simple, { minWorkers: 3, maxWorkers: 3, roundrobin: true });
+      return runInSequence(6, function () {
+        return pool.exec('add', [1, 2]);
+      }).then(function () {
+        assert.deepStrictEqual(requestCounts(pool), [2, 2, 2]);
+      });
+    });
+
+    it('should send every task with the same affinity to the same worker', function () {
+      var pool = createPool(simple, { minWorkers: 3, maxWorkers: 3 });
+      return runInSequence(4, function () {
+        return pool.exec('add', [1, 2], { affinity: 4 });
+      }).then(function () {
+        assert.deepStrictEqual(requestCounts(pool), [0, 4, 0]);
+      });
+    });
+
+    it('should let affinity take precedence over roundrobin', function () {
+      var pool = createPool(simple, { minWorkers: 3, maxWorkers: 3, roundrobin: true });
+      return runInSequence(3, function () {
+        return pool.exec('add', [1, 2], { affinity: 2 });
+      }).then(function () {
+        assert.deepStrictEqual(requestCounts(pool), [0, 0, 3]);
+      });
+    });
+
+    it('should not create more than maxWorkers for a pool without a script', function () {
+      var pool = createPool({ maxWorkers: 2 });
+      return Promise.all([pool.exec(add, [1, 2]), pool.exec(add, [3, 4])]).then(function (results) {
+        assert.deepStrictEqual(results, [3, 7]);
+        assert.ok(pool.workers.length <= 2, 'created ' + pool.workers.length + ' workers');
+      });
+    });
+
+    it('should replace a worker that crashes, keeping minWorkers', function () {
+      var pool = createPool({ minWorkers: 2, maxWorkers: 2 });
+      var crashed = pool.workers[0];
+      return pool.exec(function () {
+        process.exit(1);
+      }, [], { affinity: 0 }).then(function () {
+        assert.fail('the task should fail with its worker');
+      }, function () {
+        return delay(100);
+      }).then(function () {
+        assert.strictEqual(pool.workers.length, 2);
+        assert.ok(pool.workers.indexOf(crashed) === -1, 'the crashed worker should be gone');
+      });
+    });
+
+    it('should finish terminating and bring the pool back to minWorkers', function () {
+      var pool = createPool({ minWorkers: 2, maxWorkers: 2 });
+      var original = pool.workers.slice();
+      return pool.exec(add, [1, 2]).then(function () {
+        return pool.terminate();
+      }).then(function () {
+        return delay(100);
+      }).then(function () {
+        assert.strictEqual(pool.workers.length, 2);
+        pool.workers.forEach(function (worker) {
+          assert.ok(original.indexOf(worker) === -1, 'every worker should be a replacement');
+        });
+        return pool.exec(add, [3, 4]);
+      }).then(function (result) {
+        assert.strictEqual(result, 7);
+      });
+    });
+
+    it('should deliver a thrown error carrying a function and a bigint', function () {
+      var pool = createPool({ maxWorkers: 1, workerType: 'thread' });
+      return pool.exec(function () {
+        var error = new Error('boom');
+        error.retry = function () {};
+        error.amount = BigInt(10);
+        throw error;
+      }).then(function () {
+        assert.fail('the task should reject');
+      }, function (error) {
+        assert.strictEqual(error.message, 'boom');
+        assert.strictEqual(error.amount, BigInt(10));
+        assert.strictEqual(error.retry, undefined);
+      });
     });
   });
 
@@ -1241,20 +1794,20 @@ describe('Pool', function () {
       return a + b;
     }
 
-    assert.strictEqual(pool.tasks.length, 0);
+    assert.strictEqual(pool.taskQueue.size(), 0);
     assert.strictEqual(pool.workers.length, 0);
 
     var task1 = pool.exec(add, [3, 4]);
     var task2 = pool.exec(add, [2, 3]);
 
-    assert.strictEqual(pool.tasks.length, 0);
+    assert.strictEqual(pool.taskQueue.size(), 0);
     assert.strictEqual(pool.workers.length, 2);
 
     var task3 = pool.exec(add, [5, 7]);
     var task4 = pool.exec(add, [1, 1]);
     var task5 = pool.exec(add, [6, 3]);
 
-    assert.strictEqual(pool.tasks.length, 3);
+    assert.strictEqual(pool.taskQueue.size(), 3);
     assert.strictEqual(pool.workers.length, 2);
 
     assert.throws(function () {pool.exec(add, [9, 4])}, Error);
@@ -1267,7 +1820,7 @@ describe('Pool', function () {
         task5
         ])
         .then(function () {
-          assert.strictEqual(pool.tasks.length, 0);
+          assert.strictEqual(pool.taskQueue.size(), 0);
           assert.strictEqual(pool.workers.length, 2);
 
           return pool.terminate();
@@ -1295,8 +1848,455 @@ describe('Pool', function () {
           })
           .catch(function (err) {
             console.log(err);
-            assert('Should not throw an error');
+            assert.fail('Should not throw an error');
             done(err);
           });
+  });
+
+  it('should support sending transferable object to worker', function (done) {
+    var pool = createPool(__dirname + '/workers/transfer-to.js');
+
+    var size = 8;
+    var uInt8Array = new Uint8Array(size).map((_v, i) => i);
+    pool.exec('transfer', [uInt8Array], {
+            transfer: [uInt8Array.buffer]
+          })
+          .then(function (result) {
+            assert.strictEqual(result, size);
+            // original buffer should be transferred thus empty
+            assert.strictEqual(uInt8Array.byteLength, 0);
+
+            pool.terminate();
+            done();
+          })
+          .catch(function (err) {
+            console.log(err);
+            assert.fail('Should not throw an error');
+            done(err);
+          });
+  });
+
+  it('should support sending transferable object from worker', function (done) {
+    var pool = createPool(__dirname + '/workers/transfer-from.js');
+
+    var size = 8;
+    pool.exec('transfer', [size])
+          .then(function (result) {
+            assert.strictEqual(result.byteLength, size);
+
+            pool.terminate();
+            done();
+          })
+          .catch(function (err) {
+            console.log(err);
+            assert.fail('Should not throw an error');
+            done(err);
+          });
+  });
+
+  it('should call worker termination handler', function () {
+    var pool = createPool(__dirname + '/workers/cleanup.js');
+
+    var handlerCalled = false;
+    var channel = new MessageChannel();
+    channel.port1.onmessage = function (event) {
+      assert.strictEqual(event.data, 0);
+      handlerCalled = true;
+    };
+
+    pool.exec('asyncAdd', [1, 2, channel.port2], {
+      transfer: [channel.port2],
+    });
+
+    return pool.terminate().then(function () {
+      assert(handlerCalled);
+    });
+  });
+
+  it('should call worker termination async handler', function () {
+    var pool = createPool(__dirname + '/workers/cleanup-async.js');
+
+    var handlerCalled = false;
+    var channel = new MessageChannel();
+    channel.port1.onmessage = function (event) {
+      assert.strictEqual(event.data, 0);
+      handlerCalled = true;
+    };
+
+    pool.exec('asyncAdd', [1, 2, channel.port2], {
+      transfer: [channel.port2],
+    });
+
+    return pool.terminate().then(function () {
+      assert(handlerCalled);
+    });
+  });
+
+  it('should not call worker termination async handler after timeout', function () {
+    var pool = createPool(__dirname + '/workers/cleanup-async.js', {
+      workerTerminateTimeout: 1,
+    });
+
+    var handlerCalled = false;
+    var channel = new MessageChannel();
+    channel.port1.onmessage = function (event) {
+      assert.strictEqual(event.data, 0);
+      handlerCalled = true;
+    };
+
+    pool.exec('asyncAdd', [1, 2, channel.port2], {
+      transfer: [channel.port2],
+    });
+
+    return pool.terminate().then(function () {
+      assert(handlerCalled === false);
+    });
+  });
+
+
+  describe('abort handler', () => {
+  it('should not terminate worker if abort listener is defined dedicated worker with Timeout', function () {
+      var workerCount = 0;
+      var pool = createPool(__dirname + '/workers/cleanup-abort.js', {
+        maxWorkers: 1,
+        onCreateWorker: () => {
+          workerCount += 1;
+        }
+      });
+
+      return pool.exec('asyncTimeout', [])
+        .timeout(200)
+        .catch(function (err) {
+          assert(err instanceof Promise.TimeoutError);
+          let stats = pool.stats();
+          assert.strictEqual(workerCount, 1);
+          assert.strictEqual(stats.totalWorkers, 1);
+          // Still busy - cleanup is in progress.
+          assert.strictEqual(stats.busyWorkers, 1);
+        }).then(function() {
+          return pool.exec(add, [1, 2])
+        }).then(function() {
+          var stats = pool.stats();
+          assert.strictEqual(workerCount, 1);
+          assert.strictEqual(stats.totalWorkers, 1);
+          assert.strictEqual(stats.idleWorkers, 1);
+          assert.strictEqual(stats.busyWorkers, 0);
+
+        });
+    });
+
+    it('should not terminate worker if abort listener is defined dedicated worker with Cancellation', function () {
+      var workerCount = 0;
+      var pool = createPool(__dirname + '/workers/cleanup-abort.js', {
+        maxWorkers: 1,
+        onCreateWorker: () => {
+          workerCount += 1;
+        },
+      });
+
+      let task = pool.exec('asyncTimeout', [],  {});
+
+      // Wrap in a new promise which waits 50ms
+      // in order to allow the function executing in the
+      // worker to execute to termination
+      return new Promise(function(resolve) {
+        setTimeout(function() {
+          resolve();
+        }, 50);
+      }).then(function() {
+          return task
+          .cancel()
+          .catch(function (err) {
+            assert(err instanceof Promise.CancellationError);
+            let stats = pool.stats();
+            assert.strictEqual(workerCount, 1);
+            assert.strictEqual(stats.totalWorkers, 1);
+            // Still busy - cleanup is in progress on the worker.
+            assert.strictEqual(stats.busyWorkers, 1);
+          }).then(function() {
+            return pool.exec(add, [1, 2])
+          }).then(function() {
+            var stats = pool.stats();
+            assert.strictEqual(workerCount, 1);
+            assert.strictEqual(stats.totalWorkers, 1);
+            assert.strictEqual(stats.idleWorkers, 1);
+            assert.strictEqual(stats.busyWorkers, 0);
+
+          });
+      });
+    });
+
+
+    it('should not terminate worker if abort listener is defined inline worker with Timeout', function () {
+      var workerCount = 0;
+      var pool = createPool({
+        onCreateWorker: () => {
+          workerCount += 1;
+        },
+        maxWorkers: 1,
+      });
+      function asyncTimeout() {
+        var me = this;
+        return new Promise(function () {
+          let timeout = setTimeout(function() {
+              resolve();
+          }, 5000);
+          me.worker.addAbortListener(function () {
+            return new Promise(function (resolve) {
+              clearTimeout(timeout);
+              resolve();
+            });
+          });
+        });
+      }
+      function add(a, b) { }
+      return pool.exec(asyncTimeout, [],  {
+      })
+      .timeout(200)
+      .catch(function(err) {
+        assert(err instanceof Promise.TimeoutError);
+        var stats = pool.stats();
+        assert.strictEqual(workerCount, 1);
+        assert.strictEqual(stats.totalWorkers, 1);
+        assert.strictEqual(stats.idleWorkers, 1);
+        assert.strictEqual(stats.busyWorkers, 0);
+      }).always(function () {
+        return pool.exec(add, [1, 2]).then(function () {
+          var stats = pool.stats();
+          assert.strictEqual(workerCount, 1);
+          assert.strictEqual(stats.totalWorkers, 1);
+          assert.strictEqual(stats.idleWorkers, 1);
+          assert.strictEqual(stats.busyWorkers, 0);
+
+        });
+      });
+    });
+
+    it('should not terminate worker if abort listener is defined inline worker with Cancellation', function () {
+      var workerCount = 0;
+      var pool = createPool({
+        onCreateWorker: () => {
+          workerCount += 1;
+        },
+        maxWorkers: 1,
+      });
+
+      function asyncTimeout() {
+        var me = this;
+        return new Promise(function (_resolve, reject) {
+          let timeout = setTimeout(function() {
+              reject(new Error("should not be thrown"));
+          }, 5000);
+          me.worker.addAbortListener(function () {
+            return new Promise(function (resolve) {
+              clearTimeout(timeout);
+              resolve();
+            });
+          });
+        });
+      }
+      function add(a, b) { }
+      const task = pool.exec(asyncTimeout, [],  {
+      })
+      return new Promise(function(resolve) {
+        setTimeout(function() {
+          resolve();
+        }, 50);
+      }).then(function() {
+        return task
+        .cancel()
+        .catch(function(err) {
+          assert(err instanceof Promise.TimeoutError);
+          var stats = pool.stats();
+          assert(stats.busyWorkers === 1);
+          assert.strictEqual(stats.totalWorkers, 1);
+        }).always(function () {
+          return pool.exec(add, [1, 2]).then(function () {
+            var stats = pool.stats();
+            assert.strictEqual(workerCount, 1);
+            assert.strictEqual(stats.totalWorkers, 1);
+            assert.strictEqual(stats.idleWorkers, 1);
+            assert.strictEqual(stats.busyWorkers, 0);
+
+          });
+        });
+      });
+
+    });
+
+    it('should invoke timeout for abort handler if timeout period is reached with Timeout', function (done) {
+      var workerCount = 0;
+      var pool = createPool(__dirname + '/workers/cleanup-abort.js', {
+        maxWorkers: 2,
+        onCreateWorker: function() {
+          workerCount += 1;
+        },
+        onTerminateWorker: function(_) {
+          // call done in the termination callback so we know
+          // the worker was terminated before the test resolves
+          assert.strictEqual(pool.stats().totalWorkers, 0);
+          done();
+        }
+      });
+
+      const _ = pool.exec('asyncAbortHandlerNeverResolves', [])
+      .timeout(1000)
+      .catch(function (err) {
+        assert(err instanceof Promise.TimeoutError);
+
+        var stats = pool.stats();
+        assert.strictEqual(stats.busyWorkers, 1);
+        assert.strictEqual(stats.totalWorkers, 1);
+      }).always(function() {
+        var stats = pool.stats();
+        assert.strictEqual(stats.busyWorkers, 0);
+        assert.strictEqual(stats.totalWorkers, 1);
+        return pool.exec(add, [1, 2]).then(function() {
+          var stats = pool.stats();
+          assert.strictEqual(workerCount, 1);
+          assert.strictEqual(stats.totalWorkers, 1);
+          assert.strictEqual(stats.idleWorkers, 1);
+          assert.strictEqual(stats.busyWorkers, 0);
+
+        });
+      });
+    });
+
+
+    it('should invoke timeout for abort handler if timeout period is reached with Cancellation', function (done) {
+      var workerCount = 0;
+      var pool = createPool(__dirname + '/workers/cleanup-abort.js', {
+        maxWorkers: 1,
+        onCreateWorker: function() {
+          workerCount += 1;
+        },
+        onTerminateWorker: function(_) {
+          // call done in the termination callback so we know
+          // the worker was terminated before the test resolves
+          assert.strictEqual(pool.stats().totalWorkers, 0);
+          done();
+        }
+      });
+
+      const task = pool.exec('asyncAbortHandlerNeverResolves', [])
+
+      const _ = new Promise(function(resolve) {
+        setTimeout(function() {
+          resolve();
+        }, 50);
+      }).then(function() {
+        return task.cancel()
+        .catch(function (err) {
+          assert(err instanceof Promise.TimeoutError);
+          var stats = pool.stats();
+          assert(stats.busyWorkers === 1);
+        }).always(function() {
+          assert.strictEqual(workerCount, 1);
+
+          var stats = pool.stats();
+          assert.strictEqual(stats.busyWorkers, 0);
+          assert.strictEqual(stats.idleWorkers, 1);
+          assert.strictEqual(stats.totalWorkers, 1);
+          return pool.exec(add, [1, 2]).then(function() {
+            assert.strictEqual(workerCount, 1);
+            var stats = pool.stats();
+
+            assert.strictEqual(stats.busyWorkers, 0);
+            assert.strictEqual(stats.idleWorkers, 1);
+            assert.strictEqual(stats.totalWorkers, 1);
+          });
+        });
+      });
+    });
+
+    it('should trigger event stdout in abort handler', function (done) {
+      var pool = createPool(__dirname + '/workers/cleanup-abort.js', {
+        maxWorkers: 1,
+        workerType: 'process',
+        emitStdStreams: true,
+        workerTerminateTimeout: 1000,
+      });
+
+      pool.exec('stdoutStreamOnAbort', [], {
+        on: function (payload) {
+          assert.strictEqual(payload.stdout.trim(), "Hello, world!");
+          pool.terminate();
+          done();
+        }
+      }).timeout(50);
+    });
+
+    it('should trigger event in abort handler', function (done) {
+      var pool = createPool(__dirname + '/workers/cleanup-abort.js', {
+        maxWorkers: 1,
+        workerType: 'process',
+        emitStdStreams: true,
+        workerTerminateTimeout: 1000,
+      });
+
+      pool.exec('eventEmitOnAbort', [], {
+        on: function (payload) {
+          assert.strictEqual(payload.status, 'cleanup_success');
+          pool.terminate();
+          done();
+        }
+      }).timeout(50);
+    });
+  });
+
+  describe('validate', () => {
+    it('should not allow unknown properties in forkOpts', function() {
+      var pool = createPool({
+        workerType: 'process',
+        forkOpts: { foo: 42 }
+      });
+
+      assert.throws(function () {
+        pool.exec(add, [3, 4]);
+      }, /Error: Object "forkOpts" contains an unknown option "foo"/);
+    });
+
+    it('should not allow inherited properties in forkOpts', function() {
+      var pool = createPool({
+        workerType: 'process'
+      });
+
+      // prototype pollution
+      Object.prototype.env = { NODE_OPTIONS: '--inspect-brk=0.0.0.0:1337' };
+
+      assert.throws(function () {
+        pool.exec(add, [3, 4]);
+      }, /Error: Object "forkOpts" contains an inherited option "env"/);
+
+      delete Object.prototype.env;
+      after(() => { delete Object.prototype.env });
+    });
+
+    it('should not allow unknown properties in workerThreadOpts', function() {
+      var pool = createPool({
+        workerType: 'thread',
+        workerThreadOpts: { foo: 42 }
+      });
+
+      assert.throws(function () {
+        pool.exec(add, [3, 4]);
+      }, /Error: Object "workerThreadOpts" contains an unknown option "foo"/);
+    });
+
+    it('should not allow inherited properties in workerThreadOpts', function() {
+      var pool = createPool({
+        workerType: 'thread'
+      });
+
+      // prototype pollution
+      Object.prototype.env = { NODE_OPTIONS: '--inspect-brk=0.0.0.0:1337' };
+
+      assert.throws(function () {
+        pool.exec(add, [3, 4]);
+      }, /Error: Object "workerThreadOpts" contains an inherited option "env"/);
+
+      delete Object.prototype.env;
+      after(() => { delete Object.prototype.env });
+    });
   });
 });

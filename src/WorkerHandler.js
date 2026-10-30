@@ -1,27 +1,28 @@
-"use strict";
+'use strict';
 
-var Promise = require("./Promise");
-var environment = require("./environment");
-var requireFoolWebpack = require("./requireFoolWebpack");
+var {Promise} = require('./Promise');
+var environment = require('./environment');
+const {validateOptions, forkOptsNames, workerThreadOptsNames, workerOptsNames} = require("./validateOptions");
 
 /**
  * Special message sent by parent which causes a child process worker to terminate itself.
  * Not a "message object"; this string is the entire message.
  */
-var TERMINATE_METHOD_ID = "__workerpool-terminate__";
+var TERMINATE_METHOD_ID = '__workerpool-terminate__';
 
 /**
- * If sending `TERMINATE_METHOD_ID` does not cause the child process to exit in this many milliseconds,
- * force-kill the child process.
+ * Special message by parent which causes a child process worker to perform cleaup
+ * steps before determining if the child process worker should be terminated.
  */
-var CHILD_PROCESS_EXIT_TIMEOUT = 1000;
+var CLEANUP_METHOD_ID = '__workerpool-cleanup__';
+
+// how long minTime and maxTime accumulate before they reset
+var STATS_WINDOW = 5 * 60 * 1000;
 
 function ensureWorkerThreads() {
-  var WorkerThreads = tryRequireWorkerThreads();
+  var WorkerThreads = tryRequireWorkerThreads()
   if (!WorkerThreads) {
-    throw new Error(
-      "WorkerPool: workerType = 'thread' is not supported, Node >= 11.7.0 required"
-    );
+    throw new Error('WorkerPool: workerType = \'thread\' is not supported, Node >= 11.7.0 required')
   }
 
   return WorkerThreads;
@@ -30,24 +31,16 @@ function ensureWorkerThreads() {
 // check whether Worker is supported by the browser
 function ensureWebWorker() {
   // Workaround for a bug in PhantomJS (Or QtWebkit): https://github.com/ariya/phantomjs/issues/14534
-  if (
-    typeof Worker !== "function" &&
-    (typeof Worker !== "object" ||
-      typeof Worker.prototype.constructor !== "function")
-  ) {
-    throw new Error("WorkerPool: Web Workers not supported");
+  if (typeof Worker !== 'function' && (typeof Worker !== 'object' || typeof Worker.prototype.constructor !== 'function')) {
+    throw new Error('WorkerPool: Web Workers not supported');
   }
 }
 
 function tryRequireWorkerThreads() {
   try {
-    return requireFoolWebpack("worker_threads");
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      error.code === "MODULE_NOT_FOUND"
-    ) {
+    return require('worker_threads');
+  } catch(error) {
+    if (typeof error === 'object' && error !== null && error.code === 'MODULE_NOT_FOUND') {
       // no worker_threads available (old version of node.js)
       return null;
     } else {
@@ -58,74 +51,56 @@ function tryRequireWorkerThreads() {
 
 // get the default worker script
 function getDefaultWorker() {
-  if (environment.platform === "browser") {
+  if (environment.platform === 'browser') {
     // test whether the browser supports all features that we need
-    if (typeof Blob === "undefined") {
-      throw new Error("Blob not supported by the browser");
+    if (typeof Blob === 'undefined') {
+      throw new Error('Blob not supported by the browser');
     }
-    if (!window.URL || typeof window.URL.createObjectURL !== "function") {
-      throw new Error("URL.createObjectURL not supported by the browser");
+    if (!window.URL || typeof window.URL.createObjectURL !== 'function') {
+      throw new Error('URL.createObjectURL not supported by the browser');
     }
 
     // use embedded worker.js
-    var blob = new Blob([require("./generated/embeddedWorker")], {
-      type: "text/javascript",
-    });
+    var blob = new Blob([require('./generated/embeddedWorker')], {type: 'text/javascript'});
     return window.URL.createObjectURL(blob);
-  } else {
+  }
+  else {
     // use external worker.js in current directory
-    return __dirname + "/worker.js";
+    return __dirname + '/worker.js';
   }
 }
 
 function setupWorker(script, options) {
-  if (options.workerType === "web") {
-    // browser only
+  if (options.workerType === 'web') { // browser only
     ensureWebWorker();
-    return setupBrowserWorker(script, Worker);
-  } else if (options.workerType === "thread") {
-    // node.js only
+    return setupBrowserWorker(script, options.workerOpts, Worker);
+  } else if (options.workerType === 'thread') { // node.js only
     WorkerThreads = ensureWorkerThreads();
-    return setupWorkerThreadWorker(
-      script,
-      WorkerThreads,
-      options.workerThreadOpts
-    );
-  } else if (options.workerType === "process" || !options.workerType) {
-    // node.js only
-    return setupProcessWorker(
-      script,
-      resolveForkOptions(options),
-      requireFoolWebpack("child_process")
-    );
-  } else {
-    // options.workerType === 'auto' or undefined
-    if (environment.platform === "browser") {
+    return setupWorkerThreadWorker(script, WorkerThreads, options);
+  } else if (options.workerType === 'process' || !options.workerType) { // node.js only
+    return setupProcessWorker(script, resolveForkOptions(options), require('child_process'));
+  } else { // options.workerType === 'auto' or undefined
+    if (environment.platform === 'browser') {
       ensureWebWorker();
-      return setupBrowserWorker(script, Worker);
-    } else {
-      // environment.platform === 'node'
+      return setupBrowserWorker(script, options.workerOpts, Worker);
+    }
+    else { // environment.platform === 'node'
       var WorkerThreads = tryRequireWorkerThreads();
       if (WorkerThreads) {
-        return setupWorkerThreadWorker(
-          script,
-          WorkerThreads,
-          options.workerThreadOpts
-        );
+        return setupWorkerThreadWorker(script, WorkerThreads, options);
       } else {
-        return setupProcessWorker(
-          script,
-          resolveForkOptions(options),
-          requireFoolWebpack("child_process")
-        );
+        return setupProcessWorker(script, resolveForkOptions(options), require('child_process'));
       }
     }
   }
 }
 
-function setupBrowserWorker(script, Worker) {
+function setupBrowserWorker(script, workerOpts, Worker) {
+  // validate the options right before creating the worker (not when creating the pool)
+  validateOptions(workerOpts, workerOptsNames, 'workerOpts')
+
   // create the web worker
-  var worker = new Worker(script);
+  var worker = new Worker(script, workerOpts);
 
   worker.isBrowserWorker = true;
   // add node.js API to the web worker
@@ -134,39 +109,64 @@ function setupBrowserWorker(script, Worker) {
       callback(message.data);
     });
   };
-  worker.send = function (message) {
-    this.postMessage(message);
+  worker.send = function (message, transfer) {
+    this.postMessage(message, transfer);
   };
   return worker;
 }
 
-function setupWorkerThreadWorker(script, WorkerThreads, workerThreadOptions) {
+function setupWorkerThreadWorker(script, WorkerThreads, options) {
+  // validate the options right before creating the worker thread (not when creating the pool)
+  validateOptions(options?.workerThreadOpts, workerThreadOptsNames, 'workerThreadOpts')
+
   var worker = new WorkerThreads.Worker(script, {
-    stdout: false, // automatically pipe worker.STDOUT to process.STDOUT
-    stderr: false, // automatically pipe worker.STDERR to process.STDERR
-    ...workerThreadOptions,
+    stdout: options?.emitStdStreams ?? false, // pipe worker.STDOUT to process.STDOUT if not requested
+    stderr: options?.emitStdStreams ?? false,  // pipe worker.STDERR to process.STDERR if not requested
+    ...options?.workerThreadOpts
   });
   worker.isWorkerThread = true;
-  // make the worker mimic a child_process
-  worker.send = function (message) {
-    this.postMessage(message);
+  worker.send = function(message, transfer) {
+    this.postMessage(message, transfer);
   };
 
-  worker.kill = function () {
+  worker.kill = function() {
     this.terminate();
     return true;
   };
 
-  worker.disconnect = function () {
+  worker.disconnect = function() {
     this.terminate();
   };
+
+  if (options?.emitStdStreams) {
+    worker.stdout.on('data', (data) => worker.emit("stdout", data))
+    worker.stderr.on('data', (data) => worker.emit("stderr", data))
+  }
 
   return worker;
 }
 
 function setupProcessWorker(script, options, child_process) {
+  // validate the options right before creating the child process (not when creating the pool)
+  validateOptions(options.forkOpts, forkOptsNames, 'forkOpts')
+
   // no WorkerThreads, fallback to sub-process based workers
-  var worker = child_process.fork(script, options.forkArgs, options.forkOpts);
+  var worker = child_process.fork(
+    script,
+    options.forkArgs,
+    options.forkOpts
+  );
+
+  // ignore transfer argument since it is not supported by process
+  var send = worker.send;
+  worker.send = function (message) {
+    return send.call(worker, message);
+  };
+
+  if (options.emitStdStreams) {
+    worker.stdout.on('data', (data) => worker.emit("stdout", data))
+    worker.stderr.on('data', (data) => worker.emit("stderr", data))
+  }
 
   worker.isChildProcess = true;
   return worker;
@@ -176,32 +176,32 @@ function setupProcessWorker(script, options, child_process) {
 function resolveForkOptions(opts) {
   opts = opts || {};
 
-  var processExecArgv = process.execArgv.join(" ");
-  var inspectorActive = processExecArgv.indexOf("--inspect") !== -1;
-  var debugBrk = processExecArgv.indexOf("--debug-brk") !== -1;
+  var processExecArgv = process.execArgv.join(' ');
+  var inspectorActive = processExecArgv.indexOf('--inspect') !== -1;
+  var debugBrk = processExecArgv.indexOf('--debug-brk') !== -1;
 
   var execArgv = [];
   if (inspectorActive) {
-    execArgv.push("--inspect=" + opts.debugPort);
+    execArgv.push('--inspect=' + opts.debugPort);
 
     if (debugBrk) {
-      execArgv.push("--debug-brk");
+      execArgv.push('--debug-brk');
     }
   }
 
-  process.execArgv.forEach(function (arg) {
-    if (arg.indexOf("--max-old-space-size") > -1) {
-      execArgv.push(arg);
+  process.execArgv.forEach(function(arg) {
+    if (arg.indexOf('--max-old-space-size') > -1) {
+      execArgv.push(arg)
     }
-  });
+  })
 
   return Object.assign({}, opts, {
     forkArgs: opts.forkArgs,
     forkOpts: Object.assign({}, opts.forkOpts, {
-      execArgv: ((opts.forkOpts && opts.forkOpts.execArgv) || []).concat(
-        execArgv
-      ),
-    }),
+      execArgv: (opts.forkOpts && opts.forkOpts.execArgv || [])
+      .concat(execArgv),
+      stdio: opts.emitStdStreams ? "pipe": undefined
+    })
   });
 }
 
@@ -210,18 +210,27 @@ function resolveForkOptions(opts) {
  * @param {Object} obj Error that has been serialized and parsed to object
  * @return {Error} The equivalent Error.
  */
-function objectToError(obj) {
-  if (typeof obj === "string") {
+function objectToError (obj) {
+  if (typeof obj === 'string') {
     return new Error(obj);
   }
-  var temp = new Error("");
-  var props = Object.keys(obj);
+  var temp = new Error('')
+  var props = Object.keys(obj)
 
   for (var i = 0; i < props.length; i++) {
-    temp[props[i]] = obj[props[i]];
+    temp[props[i]] = obj[props[i]]
   }
 
-  return temp;
+  return temp
+}
+
+function handleEmittedStdPayload(handler, payload) {
+  // TODO: refactor if parallel task execution gets added
+  Object.values(handler.processing)
+    .forEach(task => task?.options?.on(payload));
+
+  Object.values(handler.tracking)
+    .forEach(task => task?.options?.on(payload));
 }
 
 /**
@@ -229,7 +238,7 @@ function objectToError(obj) {
  * on node.js or a WebWorker in a browser environment.
  * @param {String} [script] If no script is provided, a default worker with a
  *                          function run will be created.
- * @param {WorkerPoolOptions} _options See docs
+ * @param {import('./types.js').WorkerPoolOptions} [_options] See docs
  * @constructor
  */
 function WorkerHandler(script, _options) {
@@ -241,105 +250,86 @@ function WorkerHandler(script, _options) {
   this.debugPort = options.debugPort;
   this.forkOpts = options.forkOpts;
   this.forkArgs = options.forkArgs;
-  this.workerThreadOpts = options.workerThreadOpts;
-  this.concurrency = options.concurrency ? options.concurrency : 1;
+  this.workerOpts = options.workerOpts;
+  this.workerThreadOpts = options.workerThreadOpts
+  this.workerTerminateTimeout = options.workerTerminateTimeout;
+  this.concurrency = options.concurrency || 1;
+  this.maxExec = options.maxExec || 0;
+  this.markNotReadyAfterExec = options.markNotReadyAfterExec || false;
+  this.readyTimeoutDuration = options.readyTimeoutDuration;
+  this.initReadyTimeoutDuration = options.initReadyTimeoutDuration == null
+    ? this.readyTimeoutDuration
+    : options.initReadyTimeoutDuration;
+  this.readyTimeoutTimer = null;
   this.requestCount = 0;
   this.responseCount = 0;
-  this.maxExec = options.maxExec || 0;
   this.totalTime = 0;
   this.minTime = Infinity;
   this.maxTime = 0;
   this.lastTime = 0;
-  this.lastEnded = 0; // when the most recent task finished, so the pool can find the newest lastTime
-  this.lastElu = null; // previous event loop utilization sample, worker_threads only
-  this.markNotReadyAfterExec = options.markNotReadyAfterExec || false;
-  this.readyTimeoutDuration = options.readyTimeoutDuration;
-  this.initReadyTimeoutDuration =
-    options.initReadyTimeoutDuration == null
-      ? this.readyTimeoutDuration
-      : options.initReadyTimeoutDuration;
-
-  let _onWorkerExit = options.onWorkerExit;
+  this.lastEnded = 0;
+  this.lastElu = null;
+  this.onWorkerReady = options.onWorkerReady || function () {};
+  var onWorkerExit = options.onWorkerExit;
   this.onWorkerExit = function () {
-    if (_onWorkerExit) {
-      _onWorkerExit();
-    }
-    _onWorkerExit = null;
-  };
-
-  let _onWorkerReady = options.onWorkerReady;
-  this.onWorkerReady = function () {
-    if (_onWorkerReady) {
-      _onWorkerReady();
+    var callback = onWorkerExit;
+    onWorkerExit = null;
+    if (callback) {
+      callback();
     }
   };
-
-  this.setReadyTimeout = function (timeoutDuration) {
-    me.clearReadyTimeout();
-    if (!timeoutDuration) {
-      return;
-    }
-    me.readyTimeoutTimer = setTimeout(() => {
-      me.terminate();
-    }, timeoutDuration);
-  };
-  this.clearReadyTimeout = function () {
-    if (!me.readyTimeoutTimer) {
-      return;
-    }
-    clearTimeout(me.readyTimeoutTimer);
-    delete me.readyTimeoutTimer;
-  };
-
-  // Reset stats every hour
-  setInterval(() => {
-    this.minTime = Infinity;
-    this.maxTime = 0;
-  }, 1000 * 60 * 5);
+  this.statsWindowTimer = setInterval(function () {
+    me.minTime = Infinity;
+    me.maxTime = 0;
+  }, STATS_WINDOW);
+  if (this.statsWindowTimer.unref) {
+    this.statsWindowTimer.unref();
+  }
 
   // The ready message is only sent if the worker.add method is called (And the default script is not used)
   if (!script) {
     this.worker.ready = true;
-    this.onWorkerReady();
+    // deferred, since the pool lists this handler only once the constructor returns
+    setTimeout(this.onWorkerReady, 0);
   }
 
   // queue for requests that are received before the worker is ready
   this.requestQueue = [];
-  this.worker.on("message", function (response) {
+
+  this.worker.on("stdout", function (data) {
+    handleEmittedStdPayload(me, {"stdout": data.toString()})
+  })
+  this.worker.on("stderr", function (data) {
+    handleEmittedStdPayload(me, {"stderr": data.toString()})
+  })
+
+  this.worker.on('message', function (response) {
     if (me.terminated) {
       return;
     }
-    if (typeof response === "string" && response === "ready") {
+    if (typeof response === 'string' && response === 'ready') {
       me.clearReadyTimeout();
       me.worker.ready = true;
-      me.onWorkerReady();
       dispatchQueuedRequests();
+      me.onWorkerReady();
     } else {
       // find the task from the processing queue, and run the tasks callback
       var id = response.id;
       var task = me.processing[id];
       if (task !== undefined) {
         if (response.isEvent) {
-          if (task.options && typeof task.options.on === "function") {
+          if (task.options && typeof task.options.on === 'function') {
             task.options.on(response.payload);
           }
         } else {
-          const opts = me.processing[id];
-          const finished = Date.now();
-          const timeSpent = finished - opts.started;
-
+          var finished = Date.now();
+          var timeSpent = finished - task.started;
           me.lastTime = timeSpent;
           me.lastEnded = finished;
-          if (timeSpent > me.maxTime) {
-            me.maxTime = timeSpent;
-          }
-          if (timeSpent < me.minTime) {
-            me.minTime = timeSpent;
-          }
+          me.minTime = Math.min(me.minTime, timeSpent);
+          me.maxTime = Math.max(me.maxTime, timeSpent);
           me.totalTime += timeSpent;
-
           me.responseCount++;
-
           if (me.markNotReadyAfterExec) {
             me.worker.ready = false;
             me.setReadyTimeout(me.readyTimeoutDuration);
@@ -348,7 +338,7 @@ function WorkerHandler(script, _options) {
           // remove the task from the queue
           delete me.processing[id];
 
-          if (this.maxExec && this.responseCount >= this.maxExec) {
+          if (me.maxExec && me.responseCount >= me.maxExec) {
             me.terminating = true;
             me.onWorkerExit();
           }
@@ -362,24 +352,43 @@ function WorkerHandler(script, _options) {
           // resolve the task's promise
           if (response.error) {
             task.resolver.reject(objectToError(response.error));
-          } else {
+          }
+          else {
             task.resolver.resolve(response.result);
           }
         }
+      } else {
+        // if the task is not the current, it might be tracked for cleanup
+        var task = me.tracking[id];
+        if (task !== undefined) {
+          if (response.isEvent) {
+            if (task.options && typeof task.options.on === 'function') {
+              task.options.on(response.payload);
+            }
+          }
+        }
+      }
+
+      if (response.method === CLEANUP_METHOD_ID) {
+        var trackedTask = me.tracking[response.id];
+        if (trackedTask !== undefined) {
+          if (response.error) {
+            clearTimeout(trackedTask.timeoutId);
+            trackedTask.resolver.reject(objectToError(response.error))
+          } else {
+            me.tracking && clearTimeout(trackedTask.timeoutId);
+            // if we do not encounter an error wrap the the original timeout error and reject
+            trackedTask.resolver.reject(new WrappedTimeoutError(trackedTask.error));
+          }
+        }
+        delete me.tracking[id];
       }
     }
   });
 
-  this.setReadyTimeout(this.initReadyTimeoutDuration);
-
   // reject all running tasks on worker error
   function onError(error) {
-    console.warn(
-      "Worker exited for script",
-      me.script,
-      "(This might be expected)\n",
-      error
-    );
+    console.warn("Worker exited for script", me.script, "(This might be expected)\n", error);
     me.terminated = true;
 
     for (var id in me.processing) {
@@ -387,42 +396,52 @@ function WorkerHandler(script, _options) {
         me.processing[id].resolver.reject(error);
       }
     }
+
     me.processing = Object.create(null);
     me.onWorkerExit();
   }
 
   // send all queued requests to worker
-  function dispatchQueuedRequests() {
-    for (const request of me.requestQueue.splice(0)) {
-      me.worker.send(request);
+  function dispatchQueuedRequests()
+  {
+    for(const request of me.requestQueue.splice(0)) {
+      me.worker.send(request.message, request.transfer);
     }
   }
 
   var worker = this.worker;
   // listen for worker messages error and exit
-  this.worker.on("error", onError);
-  this.worker.on("exit", function (exitCode, signalCode) {
-    var message = "Workerpool Worker terminated Unexpectedly\n";
+  this.worker.on('error',function (error) {
+    const message = error && error.message ? error.message : String(error || 'Unknown worker error')
+    onError(new TerminateError('Workerpool Worker error: ' + message, error))
+  });
+  this.worker.on('exit', function (exitCode, signalCode) {
+    var message = 'Workerpool Worker terminated Unexpectedly\n';
 
-    message += "    exitCode: `" + exitCode + "`\n";
-    message += "    signalCode: `" + signalCode + "`\n";
+    message += '    exitCode: `' + exitCode + '`\n';
+    message += '    signalCode: `' + signalCode + '`\n';
 
-    message += "    workerpool.script: `" + me.script + "`\n";
-    message += "    spawnArgs: `" + worker.spawnargs + "`\n";
-    message += "    spawnfile: `" + worker.spawnfile + "`\n";
+    message += '    workerpool.script: `' +  me.script + '`\n';
+    message += '    spawnArgs: `' +  worker.spawnargs + '`\n';
+    message += '    spawnfile: `' + worker.spawnfile + '`\n'
 
-    message += "    stdout: `" + worker.stdout + "`\n";
-    message += "    stderr: `" + worker.stderr + "`\n";
+    message += '    stdout: `' + worker.stdout + '`\n'
+    message += '    stderr: `' + worker.stderr + '`\n'
 
-    onError(new Error(message));
+    onError(new TerminateError(message));
   });
 
   this.processing = Object.create(null); // queue with tasks currently in progress
-
+  this.tracking = Object.create(null); // queue with tasks being monitored for cleanup status
   this.terminating = false;
   this.terminated = false;
+  this.cleaning = false;
   this.terminationHandler = null;
   this.lastId = 0;
+
+  if (!this.worker.ready) {
+    this.setReadyTimeout(this.initReadyTimeoutDuration);
+  }
 }
 
 /**
@@ -430,7 +449,7 @@ function WorkerHandler(script, _options) {
  * @return {Promise.<String[], Error>} methods
  */
 WorkerHandler.prototype.methods = function () {
-  return this.exec("methods");
+  return this.exec('methods');
 };
 
 /**
@@ -438,10 +457,10 @@ WorkerHandler.prototype.methods = function () {
  * @param {String} method
  * @param {Array} [params]
  * @param {{resolve: Function, reject: Function}} [resolver]
- * @param {ExecOptions}  [options]
+ * @param {import('./types.js').ExecOptions}  [options]
  * @return {Promise.<*, Error>} result
  */
-WorkerHandler.prototype.exec = function (method, params, resolver, options) {
+WorkerHandler.prototype.exec = function(method, params, resolver, options) {
   if (!resolver) {
     resolver = Promise.defer();
   }
@@ -454,22 +473,25 @@ WorkerHandler.prototype.exec = function (method, params, resolver, options) {
     id: id,
     resolver: resolver,
     options: options,
-    started: Date.now(),
+    started: Date.now()
   };
   this.requestCount++;
 
   // build a JSON-RPC request
   var request = {
-    id: id,
-    method: method,
-    params: params,
+    message: {
+      id: id,
+      method: method,
+      params: params
+    },
+    transfer: options && options.transfer
   };
 
   if (this.terminated) {
-    resolver.reject(new Error("Worker is terminated"));
+    resolver.reject(new TerminateError('Worker is terminated'));
   } else if (this.worker.ready) {
     // send the request to the worker
-    this.worker.send(request);
+    this.worker.send(request.message, request.transfer);
   } else {
     this.requestQueue.push(request);
   }
@@ -477,43 +499,87 @@ WorkerHandler.prototype.exec = function (method, params, resolver, options) {
   // on cancellation, force the worker to terminate
   var me = this;
   return resolver.promise.catch(function (error) {
-    if (
-      error instanceof Promise.CancellationError ||
-      error instanceof Promise.TimeoutError
-    ) {
+    if (error instanceof Promise.CancellationError || error instanceof Promise.TimeoutError) {
+      me.tracking[id] = {
+        id,
+        resolver: Promise.defer(),
+        options: options,
+        error,
+      };
+
       // remove this task from the queue. It is already rejected (hence this
       // catch event), and else it will be rejected again when terminating
       delete me.processing[id];
 
-      // terminate worker
-      return me.terminateAndNotify(true).then(
-        function () {
-          throw error;
-        },
-        function (err) {
-          throw err;
+      me.tracking[id].resolver.promise = me.tracking[id].resolver.promise.catch(function(err) {
+        delete me.tracking[id];
+
+        // if we find the error is an instance of WrappedTimeoutError we know the error should not cause termination
+        // as the response from the worker did not contain an error. We still wish to throw the original timeout error
+        // to the caller.
+        if (err instanceof WrappedTimeoutError) {
+          throw err.error;
         }
-      );
+
+        var promise = me.terminateAndNotify(true)
+          .then(function() {
+            throw err;
+          }, function(err) {
+            throw err;
+          });
+
+        return promise;
+      });
+
+      me.worker.send({
+        id,
+        method: CLEANUP_METHOD_ID
+      });
+
+
+      /**
+        * Sets a timeout to reject the cleanup operation if the message sent to the worker
+        * does not receive a response. see worker.tryCleanup for worker cleanup operations.
+        * Here we use the workerTerminateTimeout as the worker will be terminated if the timeout does invoke.
+        *
+        * We need this timeout in either case of a Timeout or Cancellation Error as if
+        * the worker does not send a message we still need to give a window of time for a response.
+        *
+        * The workerTerminateTimeout is used here if this promise is rejected the worker cleanup
+        * operations will occur.
+      */
+      me.tracking[id].timeoutId = setTimeout(function() {
+          me.tracking[id].resolver.reject(error);
+      }, me.workerTerminateTimeout);
+
+      return me.tracking[id].resolver.promise;
     } else {
       throw error;
     }
-  });
+  })
 };
 
 /**
- * Test whether the worker is working or not
+ * Test whether the worker is at its `concurrency` limit or cleaning up before termination.
  * @return {boolean} Returns true if the worker is busy
  */
 WorkerHandler.prototype.busy = function () {
-  return Object.keys(this.processing).length >= this.concurrency;
+  // A worker with entries in `tracking` has a cancelled or timed-out task whose
+  // cleanup may force-terminate the worker after `workerTerminateTimeout`. New
+  // tasks must not be assigned to it during that window — if they were, the
+  // forced terminate would reject them with "Worker terminated" even though
+  // they were unrelated to the original cancellation.
+  return this.cleaning
+    || Object.keys(this.processing).length >= this.concurrency
+    || Object.keys(this.tracking).length > 0;
 };
 
 /**
- * Test whether the worker is available to take new tasks
+ * Test whether the worker can take a task right now.
  * @return {boolean} Returns true if the worker is available
  */
 WorkerHandler.prototype.available = function () {
-  return (
+  return Boolean(
     this.worker &&
     !this.terminated &&
     !this.terminating &&
@@ -524,31 +590,40 @@ WorkerHandler.prototype.available = function () {
 };
 
 /**
- * Event loop utilization of this worker, as fractions between 0 and 1:
- * `lifetime` covers everything since the worker started, `window` covers the
- * interval since the previous call to this method. The first call has no
- * previous sample to measure against, so its two values are the same.
- *
- * Only a worker_thread can measure this. A child process or web worker has no
- * equivalent and returns null rather than 0, so callers can leave it out of an
- * average instead of skewing it.
- *
- * Reading advances the window, so poll this from one place and share the result.
- *
+ * Event loop utilization over the worker's life and since the previous call; null outside worker_threads.
  * @return {{lifetime: number, window: number} | null} utilization
  */
 WorkerHandler.prototype.utilization = function () {
   if (!this.worker || !this.worker.performance) {
     return null;
   }
-
   var elu = this.worker.performance.eventLoopUtilization();
   var since = this.lastElu
     ? this.worker.performance.eventLoopUtilization(elu, this.lastElu)
     : elu;
-
   this.lastElu = elu;
   return { lifetime: elu.utilization, window: since.utilization };
+};
+
+/**
+ * Terminate the worker unless it reports ready within `duration` milliseconds; a falsy duration only clears the timer.
+ * @param {number} [duration]
+ */
+WorkerHandler.prototype.setReadyTimeout = function (duration) {
+  var me = this;
+  this.clearReadyTimeout();
+  if (duration) {
+    this.readyTimeoutTimer = setTimeout(function () {
+      me.terminate();
+    }, duration);
+  }
+};
+
+WorkerHandler.prototype.clearReadyTimeout = function () {
+  if (this.readyTimeoutTimer) {
+    clearTimeout(this.readyTimeoutTimer);
+    this.readyTimeoutTimer = null;
+  }
 };
 
 /**
@@ -566,75 +641,97 @@ WorkerHandler.prototype.terminate = function (force, callback) {
     // cancel all tasks in progress
     for (var id in this.processing) {
       if (this.processing[id] !== undefined) {
-        this.processing[id].resolver.reject(new Error("Worker terminated"));
+        this.processing[id].resolver.reject(new Error('Worker terminated'));
       }
     }
+
     this.processing = Object.create(null);
   }
 
-  if (typeof callback === "function") {
-    this.terminationHandler = callback;
+  // If we are terminating, cancel all tracked task for cleanup
+  for (var task of Object.values(me.tracking)) {
+    clearTimeout(task.timeoutId);
+    task.resolver.reject(new Error('Worker Terminating'));
+  }
+
+  me.tracking = Object.create(null);
+
+  if (typeof callback === 'function') {
+    // the pool's replacement hook terminates a worker that is already shutting down; both callers get called back
+    var previousHandler = this.terminationHandler;
+    this.terminationHandler = previousHandler
+      ? function (err, worker) {
+        previousHandler(err, worker);
+        callback(err, worker);
+      }
+      : callback;
   }
   if (!this.busy()) {
     // all tasks are finished. kill the worker
-    var cleanup = function (err) {
+    var cleanup = function(err) {
       me.terminated = true;
+      me.cleaning = false;
+      clearInterval(me.statsWindowTimer);
+
       if (me.worker != null && me.worker.removeAllListeners) {
         // removeAllListeners is only available for child_process
-        me.worker.removeAllListeners("message");
+        me.worker.removeAllListeners('message');
       }
       me.worker = null;
       me.terminating = false;
-      if (me.terminationHandler) {
-        me.terminationHandler(err, me);
+      var terminationHandler = me.terminationHandler;
+      me.terminationHandler = null;
+      if (terminationHandler) {
+        terminationHandler(err, me);
       } else if (err) {
         throw err;
       }
-    };
+    }
 
     if (this.worker) {
-      if (typeof this.worker.kill === "function") {
+      if (typeof this.worker.kill === 'function') {
         if (this.worker.killed) {
-          cleanup(new Error("worker already killed!"));
+          cleanup(new Error('worker already killed!'));
           return;
         }
 
-        if (this.worker.isChildProcess) {
-          var cleanExitTimeout = setTimeout(function () {
-            if (me.worker) {
-              me.worker.kill();
-            }
-          }, CHILD_PROCESS_EXIT_TIMEOUT);
-
-          this.worker.once("exit", function () {
-            clearTimeout(cleanExitTimeout);
-            if (me.worker) {
-              me.worker.killed = true;
-            }
-            cleanup();
-          });
-
-          if (this.worker.ready) {
-            this.worker.send(TERMINATE_METHOD_ID);
-          } else {
-            this.requestQueue.push(TERMINATE_METHOD_ID);
+        // child process and worker threads
+        var cleanExitTimeout = setTimeout(function() {
+          if (me.worker) {
+            me.worker.kill();
           }
-        } else {
-          // worker_thread
-          this.worker.kill();
-          this.worker.killed = true;
+        }, this.workerTerminateTimeout);
+
+        this.worker.once('exit', function() {
+          clearTimeout(cleanExitTimeout);
+          if (me.worker) {
+            me.worker.killed = true;
+          }
           cleanup();
+        });
+
+        if (this.worker.ready) {
+          this.worker.send(TERMINATE_METHOD_ID);
+        } else {
+          this.requestQueue.push({ message: TERMINATE_METHOD_ID });
         }
+
+        // mark that the worker is cleaning up resources
+        // to prevent new tasks from being executed
+        this.cleaning = true;
         return;
-      } else if (typeof this.worker.terminate === "function") {
+      }
+      else if (typeof this.worker.terminate === 'function') {
         this.worker.terminate(); // web worker
         this.worker.killed = true;
-      } else {
-        throw new Error("Failed to terminate worker");
+      }
+      else {
+        throw new Error('Failed to terminate worker');
       }
     }
     cleanup();
-  } else {
+  }
+  else {
     // we can't terminate immediately, there are still tasks being executed
     this.terminating = true;
   }
@@ -653,9 +750,9 @@ WorkerHandler.prototype.terminate = function (force, callback) {
 WorkerHandler.prototype.terminateAndNotify = function (force, timeout) {
   var resolver = Promise.defer();
   if (timeout) {
-    resolver.promise.timeout = timeout;
+    resolver.promise.timeout(timeout);
   }
-  this.terminate(force, function (err, worker) {
+  this.terminate(force, function(err, worker) {
     if (err) {
       resolver.reject(err);
     } else {
@@ -665,9 +762,32 @@ WorkerHandler.prototype.terminateAndNotify = function (force, timeout) {
   return resolver.promise;
 };
 
+/**
+* Wrapper error type to denote that a TimeoutError has already been processed
+* and we should skip cleanup operations
+* @param {Promise.TimeoutError} timeoutError
+*/
+function WrappedTimeoutError(timeoutError) {
+  this.error = timeoutError;
+  this.stack = (new Error()).stack;
+}
+
+class TerminateError extends Error {
+  /**
+   * Create a timeout error
+   * @param {String} [message]
+   * @param {Error=} [cause]
+   */
+  constructor(message, cause) {
+    super(message || 'worker terminated');
+    this.cause = cause;
+  }
+}
+
 module.exports = WorkerHandler;
 module.exports._tryRequireWorkerThreads = tryRequireWorkerThreads;
 module.exports._setupProcessWorker = setupProcessWorker;
 module.exports._setupBrowserWorker = setupBrowserWorker;
 module.exports._setupWorkerThreadWorker = setupWorkerThreadWorker;
 module.exports.ensureWorkerThreads = ensureWorkerThreads;
+module.exports.TerminateError = TerminateError

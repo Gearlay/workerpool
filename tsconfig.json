@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "lib": [
+      "ES2020", "WebWorker"
+    ],
+    "target": "ES2020",
+    "allowJs": true,
+    "declaration": true,
+    "strict": true,
+    "emitDeclarationOnly": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "nodenext",
+    "module": "nodenext",
+    "rootDir":  "./src",
+    "outDir": "./types"
+  },
+  "files": [
+    "src/index.js"
+  ]
+}

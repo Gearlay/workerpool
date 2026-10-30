@@ -1,5 +1,5 @@
 var assert = require('assert');
-var Promise = require('../src/Promise');
+var {Promise} = require('../src/Promise');
 
 describe ('Promise', function () {
 
@@ -208,6 +208,197 @@ describe ('Promise', function () {
         assert.strictEqual(result, 'err');
         done();
       });
+    });
+  });
+
+  describe('finally', function () {
+    it('should call finally when resolved', function(done) {
+      var isFullfilled = false;
+      var finallyRan = false;
+      var p = new Promise(function(resolve, _reject) {
+        resolve(1); 
+      }).then(function(value) {
+        isFullfilled = true; 
+      }).finally(function(value) {
+        assert.ok(isFullfilled, "should call finally after resolve");
+        assert.equal(value, undefined);
+        finallyRan = true;
+      }).then(function() {
+        assert.ok(finallyRan, "finallyRan should be called");
+
+        done();
+      });
+
+      assert.strictEqual(p.resolved, true);
+      assert.strictEqual(p.rejected, false);
+      assert.strictEqual(p.pending, false);
+    });
+
+    it('should call finally when rejected and error is not returned', function(done) {
+      var isFullfilled = false;
+      var finallyRan = false;
+      var p = new Promise(function(_resolve, reject) {
+        reject(new Error('An error has occured')); 
+      }).catch(function(_err) {
+        isFullfilled = true;
+        // dont return the error so the promise doesnt reject and the chain can continue
+      }).finally(function(value) {
+        assert.ok(isFullfilled, "should call finally after reject");
+        assert.equal(value, undefined);
+        finallyRan = true;
+      }).then(function() {
+        assert.ok(finallyRan, "finallyRan should be called");
+
+        done();
+      });
+
+      assert.strictEqual(p.resolved, false);
+      assert.strictEqual(p.rejected, true);
+      assert.strictEqual(p.pending, false);
+    });
+
+    it('should continue promise chain from finally if not rejected', function(done) {
+      var isFullfilled = false;
+      var finallyRan = false;
+      var p = new Promise(function(resolve, _reject) {
+        resolve(); 
+      }).then(function () {
+        isFullfilled = true; 
+      }).finally(function(value) {
+        assert.ok(isFullfilled, "should call finally after resolve");
+        assert.equal(value, undefined);
+        finallyRan = true;
+      });
+
+      return p.then(function() {
+        assert.ok(finallyRan, 'finallyRan should be true');
+        assert.strictEqual(p.resolved, true);
+        assert.strictEqual(p.rejected, false);
+        assert.strictEqual(p.pending, false);
+        done();
+      });
+    });
+
+    it('should not pass arguments to finally (resolving)', function(done) {
+      new Promise(resolve => resolve(42))
+        .finally((arg) => {
+          assert.strictEqual(arg, undefined)
+          done()
+        })
+    });
+
+    it('should not pass arguments to finally (rejecting)', function(done) {
+      new Promise((resolve, reject) => reject('Some error'))
+        .finally((arg) => {
+          assert.strictEqual(arg, undefined)
+          done()
+        })
+    });
+
+    it('should not return arguments from finally', function(done) {
+      new Promise((resolve) => resolve())
+        .finally(() => {
+          return 42
+        })
+        .then((arg) => {
+          assert.strictEqual(arg, undefined)
+          done()
+        })
+    });
+
+    it('should pass previous value along when calling finally', function(done) {
+      let finallyCalled = false
+
+      new Promise((resolve) => resolve(42))
+        .finally(() => {
+          finallyCalled = true
+          return 123
+        })
+        .then((arg) => {
+          assert.strictEqual(arg, 42)
+          assert.strictEqual(finallyCalled, true)
+          done()
+        })
+    });
+
+    it('should rethrow previous error along when calling finally', function(done) {
+      let finallyCalled = false
+
+      new Promise((resolve, reject) => reject('some error'))
+        .finally(() => {
+          finallyCalled = true
+          return 123
+        })
+        .catch((err) => {
+          assert.strictEqual(err, 'some error')
+          assert.strictEqual(finallyCalled, true)
+          done()
+        })
+    });
+
+    it('should await a Promise returned by finally (resolving)', function(done) {
+      let finallyCalled = false
+
+      new Promise((resolve) => resolve(42))
+        .finally(() => {
+          return new Promise(resolve => setTimeout(resolve, 100)).then(() => {
+            finallyCalled = true
+          })
+        })
+        .then((arg) => {
+          assert.strictEqual(arg, 42)
+          assert.strictEqual(finallyCalled, true)
+          done()
+        })
+    });
+
+    it('should await a Promise returned by finally (rejecting)', function(done) {
+      let finallyCalled = false
+
+      new Promise((resolve, reject) => reject('some error'))
+        .finally(() => {
+          return new Promise(resolve => setTimeout(resolve, 100)).then(() => {
+            finallyCalled = true
+          })
+        })
+        .catch((err) => {
+          assert.strictEqual(err, 'some error')
+          assert.strictEqual(finallyCalled, true)
+          done()
+        })
+    });
+
+    it('should propagate cancelling a Promise via finally', function(done) {
+      let isResolved = false
+      let finallyCalled = false
+
+      const promise = new Promise((resolve, _reject) => {
+        setTimeout(resolve, 100)
+      })
+        .then(() => {
+          // we should not reach this
+          isResolved = true
+        })
+        .finally(() => {
+          finallyCalled = true
+        })
+
+      promise.cancel()
+
+      setTimeout(() => {
+        assert.strictEqual(isResolved, false)
+        assert.strictEqual(finallyCalled, true)
+        done()
+      }, 200)
+    });
+
+    it('should allow null finally', function(done) {
+      new Promise((resolve) => resolve())
+        .finally(null)
+        .then((arg) => {
+          assert.strictEqual(arg, undefined)
+          done()
+        })
     });
   });
 

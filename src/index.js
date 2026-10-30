@@ -1,49 +1,69 @@
-var environment = require("./environment");
+const {platform, isMainThread, cpus} = require('./environment');
+const {TerminateError} = require('./WorkerHandler');
+
+/** @typedef {import("./Pool")} Pool */
+/** @typedef {import("./types.js").WorkerPoolOptions} WorkerPoolOptions */
+/** @typedef {import("./types.js").WorkerRegisterOptions} WorkerRegisterOptions */
 
 /**
+ * @template { { [k: string]: (...args: any[]) => any } } T
+ * @typedef {import('./types.js').Proxy<T>} Proxy<T>
+ */
+
+/**
+ * @overload
+ * Create a new worker pool
+ * @param {WorkerPoolOptions} [script]
+ * @returns {Pool} pool
+ */
+/**
+ * @overload
  * Create a new worker pool
  * @param {string} [script]
  * @param {WorkerPoolOptions} [options]
  * @returns {Pool} pool
  */
-exports.pool = function pool(script, options) {
-  var Pool = require("./Pool");
+function pool(script, options) {
+  var Pool = require('./Pool');
 
   return new Pool(script, options);
 };
+exports.pool = pool;
 
 /**
  * Create a worker and optionally register a set of methods to the worker.
- * @param {Object} [methods]
+ * @param {{ [k: string]: (...args: any[]) => any }} [methods]
+ * @param {WorkerRegisterOptions} [options]
  */
-exports.worker = function worker(methods) {
-  var worker = require("./worker");
-  worker.add(methods);
+function worker(methods, options) {
+  var worker = require('./worker');
+  worker.add(methods, options);
 };
+exports.worker = worker;
 
 /**
  * Sends an event to the parent worker pool.
- * @param {any} payload
+ * @param {any} payload 
  */
-exports.workerEmit = function workerEmit(payload) {
-  var worker = require("./worker");
+function workerEmit(payload) {
+  var worker = require('./worker');
   worker.emit(payload);
 };
+exports.workerEmit = workerEmit;
 
-/**
- * tells the parent pool that this worker is ready.
- */
-exports.workerReady = function workerReady() {
-  var worker = require("./worker");
+/** Tells the parent pool this worker is ready again; only needed with `markNotReadyAfterExec`. */
+function workerReady() {
+  var worker = require('./worker');
   worker.ready();
 };
+exports.workerReady = workerReady;
 
-/**
- * Create a promise.
- * @type {Promise} promise
- */
-exports.Promise = require("./Promise");
+const {Promise} = require('./Promise');
+exports.Promise = Promise;
 
-exports.platform = environment.platform;
-exports.isMainThread = environment.isMainThread;
-exports.cpus = environment.cpus;
+exports.Transfer = require('./transfer');
+
+exports.platform = platform;
+exports.isMainThread = isMainThread;
+exports.cpus = cpus;
+exports.TerminateError = TerminateError;

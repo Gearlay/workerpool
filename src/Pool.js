@@ -1,72 +1,89 @@
-var Promise = require("./Promise");
+var { Promise } = require("./Promise");
 var WorkerHandler = require("./WorkerHandler");
 var environment = require("./environment");
+var { FIFOQueue, LIFOQueue } = require("./queues");
 var DebugPortAllocator = require("./debug-port-allocator");
 var DEBUG_PORT_ALLOCATOR = new DebugPortAllocator();
 
 /**
- * @typedef {"auto" | "thread" | "thread" | "web"} WorkerType
- * @typedef {Object} WorkerPoolOptions
- * @property {string[]} [forkArgs]
- * @property {import('child_process').ForkOptions} [forkOpts]
- * @property {import('worker_threads').WorkerOptions} [workerThreadOpts]
- * @property {number} [debugPortStart]
- * @property {WorkerType} [nodeWorker] alias to workerType
- * @property {boolean} [roundrobin]
- * @property {WorkerType} [workerType]
- * @property {number} [maxQueueSize]
- * @property {number} [concurrency]
- * @property {number} [gradualScaling]
- * @property {number} [maxExec] the number of distinct executions allowed
- * @property {Function} [onCreateWorker]
- * @property {Function} [onTerminateWorker]
- * @property {number} [maxWorkers]
- * @property {number | "max"} [minWorkers]
- * @property {boolean} [markNotReadyAfterExec] Default false. If true will mark the worker as not ready after an execution finishes. It then expects the worker to signal ready afterwards
- * @property {number} [readyTimeoutDuration] if not set or set to 0 will not have a ready timeout
- * @property {number} [initReadyTimeoutDuration] defaults to `readyTimeoutDuration`
-/**
- * A pool to manage workers
+ * A pool to manage workers, which can be created using the function workerpool.pool.
+ *
  * @param {String} [script]   Optional worker script
- * @param {WorkerPoolOptions} [options]  See docs
+ * @param {import('./types.js').WorkerPoolOptions} [options]  See docs
  * @constructor
  */
 function Pool(script, options) {
   if (typeof script === "string") {
+    /** @readonly */
     this.script = script || null;
   } else {
     this.script = null;
     options = script;
   }
 
+  /** @private */
   this.workers = []; // queue with all workers
-  this.tasks = []; // queue with tasks awaiting execution
+
+  /** @private */
+  this.taskQueue = this._createQueue(
+    (options && options.queueStrategy) || "fifo"
+  ); // queue with tasks awaiting execution
 
   options = options || {};
 
+  /** @readonly */
   this.forkArgs = Object.freeze(options.forkArgs || []);
+  /** @readonly */
   this.forkOpts = Object.freeze(options.forkOpts || {});
+  /** @readonly */
+  this.workerOpts = Object.freeze(options.workerOpts || {});
+  /** @readonly */
   this.workerThreadOpts = Object.freeze(options.workerThreadOpts || {});
+  /** @private */
   this.debugPortStart = options.debugPortStart || 43210;
+  /** @readonly @deprecated */
   this.nodeWorker = options.nodeWorker;
-  this.roundrobin = options.roundrobin;
+  /** @readonly
+   * @type {'auto' | 'web' | 'process' | 'thread'}
+   */
   this.workerType = options.workerType || options.nodeWorker || "auto";
+  /** @readonly */
   this.maxQueueSize = options.maxQueueSize || Infinity;
+  /** @readonly */
+  this.workerTerminateTimeout = options.workerTerminateTimeout || 1000;
+
+  /** @readonly */
+  this.onCreateWorker = options.onCreateWorker || (() => null);
+  /** @readonly */
+  this.onTerminateWorker = options.onTerminateWorker || (() => null);
+
+  /** @readonly */
+  this.emitStdStreams = options.emitStdStreams || false;
+
+  /** @readonly */
+  this.roundrobin = options.roundrobin || false;
+  /** @readonly */
   this.concurrency = options.concurrency;
+  /** @readonly */
   this.gradualScaling = options.gradualScaling || 0;
+  /** @private */
   this.canCreateWorker = true;
+  /** @readonly */
   this.maxExec = options.maxExec || 0;
+  /** @readonly */
   this.markNotReadyAfterExec = options.markNotReadyAfterExec || false;
+  /** @readonly */
   this.readyTimeoutDuration = options.readyTimeoutDuration || 0;
+  /** @readonly */
   this.initReadyTimeoutDuration =
     options.initReadyTimeoutDuration || this.readyTimeoutDuration;
-
-  this.onCreateWorker = options.onCreateWorker || (() => null);
-  this.onTerminateWorker = options.onTerminateWorker || (() => null);
+  /** @private */
+  this.lastChosen = -1;
 
   // configuration
   if (options && "maxWorkers" in options) {
     validateMaxWorkers(options.maxWorkers);
+    /** @readonly */
     this.maxWorkers = options.maxWorkers;
   } else {
     this.maxWorkers = Math.max((environment.cpus || 4) - 1, 1);
@@ -74,6 +91,7 @@ function Pool(script, options) {
 
   if (options && "minWorkers" in options) {
     if (options.minWorkers === "max") {
+      /** @readonly */
       this.minWorkers = this.maxWorkers;
     } else {
       validateMinWorkers(options.minWorkers);
@@ -83,13 +101,12 @@ function Pool(script, options) {
     this._ensureMinWorkers();
   }
 
+  /** @private */
   this._boundNext = this._next.bind(this);
 
   if (this.workerType === "thread") {
     WorkerHandler.ensureWorkerThreads();
   }
-
-  this.lastChosen = -1;
 }
 
 /**
@@ -113,16 +130,16 @@ function Pool(script, options) {
  *       .catch(function(error) {
  *         console.log(error);
  *       });
- *
- * @param {String | Function} method  Function name or function.
+ * @template { (...args: any[]) => any } T
+ * @param {String | T} method  Function name or function.
  *                                    If `method` is a string, the corresponding
  *                                    method on the worker will be executed
  *                                    If `method` is a Function, the function
  *                                    will be stringified and executed via the
  *                                    workers built-in function `run(fn, args)`.
- * @param {Array} [params]  Function arguments applied when calling the function
- * @param {ExecOptions} [options]  Options object
- * @return {Promise.<*, Error>} result
+ * @param {Parameters<T> | null} [params]  Function arguments applied when calling the function
+ * @param {import('./types.js').ExecOptions} [options]  Options
+ * @return {Promise<ReturnType<T>>}
  */
 Pool.prototype.exec = function (method, params, options) {
   // validate type of arguments
@@ -133,12 +150,11 @@ Pool.prototype.exec = function (method, params, options) {
   if (typeof method === "string") {
     var resolver = Promise.defer();
 
-    if (this.tasks.length >= this.maxQueueSize) {
+    if (this.taskQueue.size() >= this.maxQueueSize) {
       throw new Error("Max queue size of " + this.maxQueueSize + " reached");
     }
 
     // add a new task to the queue
-    var tasks = this.tasks;
     var task = {
       method: method,
       params: params,
@@ -146,13 +162,15 @@ Pool.prototype.exec = function (method, params, options) {
       timeout: null,
       options: options,
     };
-    tasks.push(task);
+    this.taskQueue.push(task);
 
     // replace the timeout method of the Promise with our own,
     // which starts the timer as soon as the task is actually started
+    // TODO: how can i find if the task is still in the queue?
     var originalTimeout = resolver.promise.timeout;
+    var taskQueue = this.taskQueue;
     resolver.promise.timeout = function timeout(delay) {
-      if (tasks.indexOf(task) !== -1) {
+      if (taskQueue.contains(task)) {
         // task is still queued -> start the timer later on
         task.timeout = delay;
         return resolver.promise;
@@ -168,7 +186,7 @@ Pool.prototype.exec = function (method, params, options) {
     return resolver.promise;
   } else if (typeof method === "function") {
     // send stringified function and function arguments to worker
-    return this.exec("run", [String(method), params]);
+    return this.exec("run", [String(method), params], options);
   } else {
     throw new TypeError('Function or string expected as argument "method"');
   }
@@ -176,9 +194,9 @@ Pool.prototype.exec = function (method, params, options) {
 
 /**
  * Create a proxy for current worker. Returns an object containing all
- * methods available on the worker. The methods always return a promise.
- *
- * @return {Promise.<Object, Error>} proxy
+ * methods available on the worker. All methods return promises resolving the methods result.
+ * @template { { [k: string]: (...args: any[]) => any } } T
+ * @return {Promise<import('./types.js').Proxy<T>, Error>} Returns a promise which resolves with a proxy object
  */
 Pool.prototype.proxy = function () {
   if (arguments.length > 0) {
@@ -217,19 +235,19 @@ Pool.prototype.map = function (array, callback) {
 /**
  * Grab the first task from the queue, find a free worker, and assign the
  * worker to the task.
- * @protected
+ * @private
  */
 Pool.prototype._next = function () {
-  if (this.tasks.length > 0) {
+  if (this.taskQueue.size() > 0) {
     // there are tasks in the queue
 
     // find an available worker
-    const affinity = this.tasks[0].options?.affinity;
-    var worker = this._getWorker(affinity);
+    var next = this.taskQueue.peek ? this.taskQueue.peek() : undefined;
+    var worker = this._getWorker(next && next.options && next.options.affinity);
     if (worker) {
       // get the first task from the queue
       var me = this;
-      var task = this.tasks.shift();
+      var task = this.taskQueue.pop();
 
       // check if the task is still pending (and not cancelled -> promise rejected)
       if (task.resolver.promise.pending) {
@@ -260,75 +278,49 @@ Pool.prototype._next = function () {
 };
 
 /**
- * Get an available worker. If no worker is available and the maximum number
- * of workers isn't yet reached, a new worker will be created and returned.
- * If no worker is available and the maximum number of workers is reached,
- * null will be returned.
- *
- * @return {WorkerHandler | null} worker
+ * Pick the affinity slot, else the next worker in turn, else the first available one; below `maxWorkers` also add a worker.
+ * @param {number} [affinity]
+ * @return {WorkerHandler | undefined} worker
  * @private
  */
 Pool.prototype._getWorker = function (affinity) {
   var workers = this.workers;
-  let chosenWorker;
+  var chosenWorker;
 
-  // Affinity trumps roundrobin
+  // affinity trumps roundrobin, and neither checks whether the worker is busy
   if (affinity != null) {
     chosenWorker = workers[affinity % workers.length];
   }
 
   if (!chosenWorker && this.roundrobin && workers.length > 0) {
-    chosenWorker =
-      workers[(this.lastChosen = ++this.lastChosen % workers.length)];
+    this.lastChosen = (this.lastChosen + 1) % workers.length;
+    chosenWorker = workers[this.lastChosen];
   }
 
   if (!chosenWorker) {
     for (var i = 0; i < workers.length; i++) {
-      var worker = workers[i];
-      if (worker.available()) {
-        chosenWorker = worker;
+      if (workers[i].available()) {
+        chosenWorker = workers[i];
         break;
       }
     }
   }
 
-  if (workers.length < this.maxWorkers) {
-    // create a new worker
-    if (this.gradualScaling === 0) {
-      worker = this._createWorkerHandler();
-      workers.push(worker);
-      chosenWorker = chosenWorker || worker;
-    } else if (this.canCreateWorker) {
+  if (workers.length < this.maxWorkers && this.canCreateWorker) {
+    if (this.gradualScaling) {
       this.canCreateWorker = false;
       setTimeout(() => (this.canCreateWorker = true), this.gradualScaling);
-      worker = this._createWorkerHandler();
-      workers.push(worker);
-      chosenWorker = chosenWorker || worker;
     }
+    var worker = this._createWorkerHandler();
+    workers.push(worker);
+    chosenWorker = chosenWorker || worker;
   }
+
   return chosenWorker;
 };
 
 /**
- * Retrieve timing and utilization statistics aggregated over the pool's live
- * workers. Workers that have been terminated but not yet dropped from the pool
- * are skipped.
- *
- * `totalTime` and `requestCount` are cumulative, while `minTime` and `maxTime`
- * only cover the current window, because WorkerHandler resets those two on an
- * interval. `requestCount` counts tasks sent, including the ones still running.
- * Utilization comes in two flavours, both averaged, bracketed and summed over
- * the workers that can report it, which means worker_threads only, and all 0
- * when nothing reported. The `Util` fields cover the interval since the
- * previous `wstats()` call, so they say how busy the pool has been lately. The
- * `LifetimeUtil` fields cover everything since each worker started, so they say
- * how busy the pool has been overall. `total` is the sum across workers, which
- * runs from 0 to the number of reporting workers, so 3 busy threads out of 4
- * reads as a total of 3 and an average of 0.75.
- *
- * Reading advances the window, so poll `wstats()` from one place and share the
- * result. Two callers polling it steal each other's intervals.
- *
+ * Timing and event loop utilization stats over the live workers; each call starts a new utilization window.
  * @return {{totalTime: number, minTime: number, lastTime: number, maxTime: number, requestCount: number, workerCount: number, workerMax: number, workersReady: number, totalUtil: number, avgUtil: number, minUtil: number, maxUtil: number, totalLifetimeUtil: number, avgLifetimeUtil: number, minLifetimeUtil: number, maxLifetimeUtil: number}} Returns an object with statistics
  */
 Pool.prototype.wstats = function () {
@@ -340,9 +332,11 @@ Pool.prototype.wstats = function () {
     maxTime: 0,
     requestCount: 0,
     totalUtil: 0,
+    avgUtil: 0,
     minUtil: Infinity,
     maxUtil: 0,
     totalLifetimeUtil: 0,
+    avgLifetimeUtil: 0,
     minLifetimeUtil: Infinity,
     maxLifetimeUtil: 0,
     workerCount: this.workers.length,
@@ -355,22 +349,16 @@ Pool.prototype.wstats = function () {
 
   for (var i = 0; i < workers.length; i++) {
     const worker = workers[i];
-    if (!worker.worker) {
+    if (!worker.worker || worker.terminated || worker.cleaning) {
       continue;
     }
     worker.worker.ready && statObj.workersReady++;
     statObj.requestCount += worker.requestCount;
     statObj.totalTime += worker.totalTime;
-    if (statObj.minTime > worker.minTime) {
-      statObj.minTime = worker.minTime;
-    }
+    statObj.minTime = Math.min(statObj.minTime, worker.minTime);
+    statObj.maxTime = Math.max(statObj.maxTime, worker.maxTime);
 
-    if (statObj.maxTime < worker.maxTime) {
-      statObj.maxTime = worker.maxTime;
-    }
-
-    // the duration of the pool's most recent task, not the largest of the
-    // per-worker last durations
+    // the pool's most recent task, not the largest of the per-worker last durations
     if (worker.lastEnded > lastEnded) {
       lastEnded = worker.lastEnded;
       statObj.lastTime = worker.lastTime;
@@ -385,32 +373,33 @@ Pool.prototype.wstats = function () {
       statObj.maxUtil = Math.max(statObj.maxUtil, utilization.window);
 
       statObj.totalLifetimeUtil += utilization.lifetime;
-      statObj.minLifetimeUtil = Math.min(
-        statObj.minLifetimeUtil,
-        utilization.lifetime
-      );
-      statObj.maxLifetimeUtil = Math.max(
-        statObj.maxLifetimeUtil,
-        utilization.lifetime
-      );
+      statObj.minLifetimeUtil = Math.min(statObj.minLifetimeUtil, utilization.lifetime);
+      statObj.maxLifetimeUtil = Math.max(statObj.maxLifetimeUtil, utilization.lifetime);
     }
   }
 
-  // no live worker has completed a task yet, so there is no minimum to report
   if (statObj.minTime === Infinity) {
     statObj.minTime = 0;
   }
 
-  // same for utilization, which no worker reports unless it is a worker_thread
   if (statObj.minUtil === Infinity) {
     statObj.minUtil = 0;
     statObj.minLifetimeUtil = 0;
   }
 
   statObj.avgUtil = utilWorkers > 0 ? statObj.totalUtil / utilWorkers : 0;
-  statObj.avgLifetimeUtil =
-    utilWorkers > 0 ? statObj.totalLifetimeUtil / utilWorkers : 0;
+  statObj.avgLifetimeUtil = utilWorkers > 0 ? statObj.totalLifetimeUtil / utilWorkers : 0;
   return statObj;
+};
+
+/**
+ * Retrieve the number of workers that can take a task right now.
+ * @return {number}
+ */
+Pool.prototype.getNumberAvailableWorkers = function () {
+  return this.workers.filter(function (worker) {
+    return worker.available();
+  }).length;
 };
 
 /**
@@ -419,7 +408,7 @@ Pool.prototype.wstats = function () {
  * pool size is met.
  * @param {WorkerHandler} worker
  * @return {Promise<WorkerHandler>}
- * @protected
+ * @private
  */
 Pool.prototype._removeWorker = function (worker) {
   var me = this;
@@ -435,6 +424,7 @@ Pool.prototype._removeWorker = function (worker) {
       me.onTerminateWorker({
         forkArgs: worker.forkArgs,
         forkOpts: worker.forkOpts,
+        workerThreadOpts: worker.workerThreadOpts,
         script: worker.script,
       });
       if (err) {
@@ -449,7 +439,7 @@ Pool.prototype._removeWorker = function (worker) {
 /**
  * Remove a worker from the pool list.
  * @param {WorkerHandler} worker
- * @protected
+ * @private
  */
 Pool.prototype._removeWorkerFromList = function (worker) {
   // remove from the list with workers
@@ -473,12 +463,21 @@ Pool.prototype.terminate = function (force, timeout) {
   var me = this;
 
   // cancel any pending tasks
-  this.tasks.forEach(function (task) {
-    task.resolver.reject(new Error("Pool terminated"));
-  });
-  this.tasks.length = 0;
+  var taskQueue = this.taskQueue;
+
+  while (taskQueue.size() > 0) {
+    var task = taskQueue.pop();
+    if (task) {
+      task.resolver.reject(new Error("Pool terminated"));
+    } else {
+      break;
+    }
+  }
+
+  taskQueue.clear();
 
   var f = function (worker) {
+    DEBUG_PORT_ALLOCATOR.releasePort(worker.debugPort);
     this._removeWorkerFromList(worker);
   };
   var removeWorker = f.bind(this);
@@ -493,6 +492,7 @@ Pool.prototype.terminate = function (force, timeout) {
         me.onTerminateWorker({
           forkArgs: worker.forkArgs,
           forkOpts: worker.forkOpts,
+          workerThreadOpts: worker.workerThreadOpts,
           script: worker.script,
         });
       });
@@ -502,18 +502,8 @@ Pool.prototype.terminate = function (force, timeout) {
 };
 
 /**
- * Retrieve the number of available workers.
- * @return {number}
- */
-Pool.prototype.getNumberAvailableWorkers = function () {
-  return this.workers.filter(function (worker) {
-    return worker.available();
-  }).length;
-};
-
-/**
  * Retrieve statistics on tasks and workers.
- * @return {{totalWorkers: number, busyWorkers: number, idleWorkers: number, pendingTasks: number, activeTasks: number}} Returns an object with statistics
+ * @return {{totalWorkers: number, busyWorkers: number, availableWorkers: number, idleWorkers: number, pendingTasks: number, activeTasks: number}} Returns an object with statistics
  */
 Pool.prototype.stats = function () {
   var totalWorkers = this.workers.length;
@@ -527,14 +517,14 @@ Pool.prototype.stats = function () {
     availableWorkers: this.getNumberAvailableWorkers(),
     idleWorkers: totalWorkers - busyWorkers,
 
-    pendingTasks: this.tasks.length,
+    pendingTasks: this.taskQueue.size(),
     activeTasks: busyWorkers,
   };
 };
 
 /**
  * Ensures that a minimum of minWorkers is up and running
- * @protected
+ * @private
  */
 Pool.prototype._ensureMinWorkers = function () {
   if (this.minWorkers) {
@@ -550,33 +540,38 @@ Pool.prototype._ensureMinWorkers = function () {
  * @private
  */
 Pool.prototype._createWorkerHandler = function () {
-  const overridenParams =
+  const overriddenParams =
     this.onCreateWorker({
       forkArgs: this.forkArgs,
       forkOpts: this.forkOpts,
+      workerOpts: this.workerOpts,
       workerThreadOpts: this.workerThreadOpts,
       script: this.script,
     }) || {};
 
   console.info("Creating new worker for script", this.script);
-  const worker = new WorkerHandler(overridenParams.script || this.script, {
-    forkArgs: overridenParams.forkArgs || this.forkArgs,
-    forkOpts: overridenParams.forkOpts || this.forkOpts,
-    workerThreadOpts: overridenParams.workerThreadOpts || this.workerThreadOpts,
+  const worker = new WorkerHandler(overriddenParams.script || this.script, {
+    forkArgs: overriddenParams.forkArgs || this.forkArgs,
+    forkOpts: overriddenParams.forkOpts || this.forkOpts,
+    workerOpts: overriddenParams.workerOpts || this.workerOpts,
+    workerThreadOpts:
+      overriddenParams.workerThreadOpts || this.workerThreadOpts,
     debugPort: DEBUG_PORT_ALLOCATOR.nextAvailableStartingAt(
       this.debugPortStart
     ),
     workerType: this.workerType,
+    workerTerminateTimeout: this.workerTerminateTimeout,
+    emitStdStreams: this.emitStdStreams,
     concurrency: this.concurrency,
-    maxExec: overridenParams.maxExec || this.maxExec,
+    maxExec: overriddenParams.maxExec || this.maxExec,
     markNotReadyAfterExec:
-      overridenParams.markNotReadyAfterExec == null
+      overriddenParams.markNotReadyAfterExec == null
         ? this.markNotReadyAfterExec
-        : overridenParams.markNotReadyAfterExec,
+        : overriddenParams.markNotReadyAfterExec,
     readyTimeoutDuration:
-      overridenParams.readyTimeoutDuration || this.readyTimeoutDuration,
+      overriddenParams.readyTimeoutDuration || this.readyTimeoutDuration,
     initReadyTimeoutDuration:
-      overridenParams.initReadyTimeoutDuration || this.initReadyTimeoutDuration,
+      overriddenParams.initReadyTimeoutDuration || this.initReadyTimeoutDuration,
     onWorkerExit: () => {
       this._removeWorker(worker);
     },
@@ -588,6 +583,40 @@ Pool.prototype._createWorkerHandler = function () {
   return worker;
 };
 
+/**
+ * Create queue instance based on strategy
+ * @param {'fifo' | 'lifo' | import('./types').TaskQueue} strategy
+ * @returns {import('./types').TaskQueue} Queue instance
+ * @private
+ */
+Pool.prototype._createQueue = function (strategy) {
+  if (typeof strategy === "string") {
+    switch (strategy) {
+      case "fifo":
+        return new FIFOQueue();
+      case "lifo":
+        return new LIFOQueue();
+      default:
+        throw new Error("Unknown queue strategy: " + strategy);
+    }
+  }
+
+  if (!strategy) {
+    throw new Error("Queue strategy cannot be null or undefined");
+  }
+
+  // validate if custom queue implements required methods
+  var requiredMethods = ["push", "pop", "size", "contains", "clear"];
+
+  for (var i = 0; i < requiredMethods.length; i++) {
+    var method = requiredMethods[i];
+    if (typeof strategy[method] !== "function") {
+      throw new Error("Queue strategy must implement method: " + method);
+    }
+  }
+
+  return strategy;
+};
 /**
  * Ensure that the maxWorkers option is an integer >= 1
  * @param {*} maxWorkers
